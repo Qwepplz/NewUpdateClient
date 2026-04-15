@@ -36,4 +36,4 @@ File-system, security, and logging concerns are separated into dedicated areas. 
 
 The solution entry point is `UpdateClient.sln`, the main project file is `src/UpdateClient/UpdateClient.csproj`, and directory-level build properties are defined in `Directory.Build.props`. The local development build script entry point is `tools/Build-UpdateClient.bat`.
 
-The license text for this repository is provided in `LICENSE.txt`. Any use or distribution of the project should follow the terms defined in that file.
+The license text for this repository is provided in `LICENSE`. Any use or distribution of the project should follow the terms defined in that file.
