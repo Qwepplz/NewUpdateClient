@@ -16,7 +16,7 @@ namespace UpdateClient.Sync
 {
     internal interface IRepositorySynchronizer
     {
-        SyncSummary Synchronize(RepositoryTarget target, string targetDirectoryPath, string targetHash, string tempRootDirectoryPath, LogSession activeLog);
+        SyncSummary Synchronize(RepositoryTarget target, RepositoryTreeResult treeResult, RepositoryRemoteKind remoteKind, string targetDirectoryPath, string targetHash, string tempRootDirectoryPath, LogSession activeLog);
     }
 
     internal sealed class RepositorySynchronizer : IRepositorySynchronizer
@@ -47,9 +47,11 @@ namespace UpdateClient.Sync
             this.gitBlobHasher = gitBlobHasher;
         }
 
-        public SyncSummary Synchronize(RepositoryTarget target, string targetDirectoryPath, string targetHash, string tempRootDirectoryPath, LogSession activeLog)
+        public SyncSummary Synchronize(RepositoryTarget target, RepositoryTreeResult treeResult, RepositoryRemoteKind remoteKind, string targetDirectoryPath, string targetHash, string tempRootDirectoryPath, LogSession activeLog)
         {
             if (target == null) throw new ArgumentNullException(nameof(target));
+            if (treeResult == null) throw new ArgumentNullException(nameof(treeResult));
+            if (treeResult.Tree == null) throw new InvalidOperationException("Repository tree is not available.");
             if (string.IsNullOrWhiteSpace(targetDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(targetDirectoryPath));
             if (string.IsNullOrWhiteSpace(targetHash)) throw new ArgumentException("Value cannot be empty.", nameof(targetHash));
             if (string.IsNullOrWhiteSpace(tempRootDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempRootDirectoryPath));
@@ -66,8 +68,7 @@ namespace UpdateClient.Sync
             string stateDirectoryPath = this.syncStateStore.GetStateDirectory(targetDirectoryPath, targetHash);
             string manifestPath = this.syncStateStore.GetLegacyManifestPath(stateDirectoryPath);
 
-            Console.WriteLine("[1/4] Reading repository tree...");
-            RepositoryTreeResult treeResult = this.remoteRepositoryClient.GetRemoteTree(target);
+            Console.WriteLine("[1/4] Repository access ready...");
             summary.Branch = treeResult.Branch;
             summary.Source = treeResult.Source;
             Console.WriteLine(string.Format("       Branch: {0}", summary.Branch));
@@ -183,7 +184,7 @@ namespace UpdateClient.Sync
                         FormatProgressStatus("[3/4] Files", index + 1, sortedRemoteFiles.Count, string.Format("added: {0} updated: {1} unchanged: {2} | downloading", summary.Added, summary.Updated, summary.Unchanged)),
                         FormatProgressBarLine(index + 1, sortedRemoteFiles.Count));
 
-                    this.DownloadRemoteFile(target, treeResult.Branch, entry, tempRootDirectoryPath, destinationPath);
+                    this.DownloadRemoteFile(target, treeResult.Branch, entry, tempRootDirectoryPath, destinationPath, remoteKind);
                     newCachedFiles[relativePath] = this.syncStateStore.CreateLocalFileState(relativePath, destinationPath, entry.sha);
 
                     if (existed)
@@ -242,9 +243,9 @@ namespace UpdateClient.Sync
             return summary;
         }
 
-        private void DownloadRemoteFile(RepositoryTarget target, string branch, TreeEntry entry, string tempRootDirectoryPath, string destinationPath)
+        private void DownloadRemoteFile(RepositoryTarget target, string branch, TreeEntry entry, string tempRootDirectoryPath, string destinationPath, RepositoryRemoteKind remoteKind)
         {
-            string tempFilePath = this.remoteRepositoryClient.DownloadVerifiedFileToTemporaryPath(target, branch, entry, tempRootDirectoryPath);
+            string tempFilePath = this.remoteRepositoryClient.DownloadVerifiedFileToTemporaryPath(target, branch, entry, tempRootDirectoryPath, remoteKind);
             try
             {
                 this.atomicFileWriter.WriteFileAtomically(tempFilePath, destinationPath);

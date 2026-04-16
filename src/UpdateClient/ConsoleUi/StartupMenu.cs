@@ -45,6 +45,45 @@ namespace UpdateClient.ConsoleUi
             }
         }
 
+        public bool ShowMirrorConfirmation(RepositoryTarget target, string githubFailureMessage)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+
+            Console.WriteLine("GitHub is unavailable for this sync.");
+            if (!string.IsNullOrWhiteSpace(githubFailureMessage))
+            {
+                Console.WriteLine("GitHub error:");
+                Console.WriteLine(githubFailureMessage);
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("You can continue with the Gitee mirror for {0}.", target.DisplayName));
+            Console.WriteLine("Risk: the mirror may lag behind GitHub.");
+            Console.WriteLine("Continuing may sync an older version, miss newer files, or remove files that only exist in newer GitHub versions.");
+            Console.WriteLine();
+            Console.Write("Type YES to continue with the mirror, or press ENTER to cancel: ");
+            try
+            {
+                string input = Console.ReadLine();
+                Console.WriteLine();
+
+                if (string.Equals((input ?? string.Empty).Trim(), "YES", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine("Mirror sync confirmed.");
+                    Console.WriteLine();
+                    return true;
+                }
+
+                Console.WriteLine("Mirror sync canceled.");
+                return false;
+            }
+            catch
+            {
+                Console.WriteLine();
+                return false;
+            }
+        }
+
         public void PauseBeforeExit()
         {
             try

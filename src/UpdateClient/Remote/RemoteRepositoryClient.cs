@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -12,13 +13,9 @@ namespace UpdateClient.Remote
 {
     internal interface IRemoteRepositoryClient
     {
-        string GetDefaultBranch(RepositoryTarget target);
+        RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
 
-        RepositoryTreeResult GetRemoteTree(RepositoryTarget target);
-
-        RepositoryTreeResult GetRemoteTree(RepositoryTarget target, IEnumerable<string> branchCandidates);
-
-        string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath);
+        string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
     }
 
     internal sealed class RemoteRepositoryClient : IRemoteRepositoryClient
@@ -28,27 +25,62 @@ namespace UpdateClient.Remote
 
         public RemoteRepositoryClient(IRepositoryUrlBuilder urlBuilder, IGitBlobHasher gitBlobHasher)
         {
-            // validating dependencies.
             if (urlBuilder == null) throw new ArgumentNullException(nameof(urlBuilder));
             if (gitBlobHasher == null) throw new ArgumentNullException(nameof(gitBlobHasher));
 
-            // storing dependencies.
             this.urlBuilder = urlBuilder;
             this.gitBlobHasher = gitBlobHasher;
 
-            // enforcing transport defaults.
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         }
 
-        public string GetDefaultBranch(RepositoryTarget target)
+        public RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
         {
-            // validating input.
             if (target == null) throw new ArgumentNullException(nameof(target));
+            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
 
-            // querying repository metadata.
+            RepositoryTreeResult treeResult = this.GetRemoteTree(target, remoteKind);
+            this.ProbeRawAccess(target, treeResult, tempDirectoryPath, remoteKind);
+            return treeResult;
+        }
+
+        public string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Value cannot be empty.", nameof(branch));
+            if (entry == null) throw new ArgumentNullException(nameof(entry));
+            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
+            if (!string.Equals(entry.type, "blob", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Only blob entries can be downloaded.");
+
+            Directory.CreateDirectory(tempDirectoryPath);
+            string url = this.urlBuilder.BuildRepositoryRawUrl(target, branch, entry.path, remoteKind);
+            string tempPath = Path.Combine(tempDirectoryPath, Guid.NewGuid().ToString("N") + ".tmp");
+
             try
             {
-                RemoteJsonResponse<RepoInfo> response = this.RequestJsonFromUrls<RepoInfo>(this.urlBuilder.BuildRepositoryInfoUrls(target));
+                this.DownloadToFile(url, tempPath);
+                string actualSha = this.gitBlobHasher.ComputeForFile(tempPath);
+                if (!string.Equals(actualSha, entry.sha, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(string.Format("Downloaded file SHA mismatch. Expected {0}, got {1}.", entry.sha, actualSha));
+                }
+
+                return tempPath;
+            }
+            catch (Exception exception)
+            {
+                this.TryDeleteFile(tempPath);
+                throw new InvalidOperationException(url + " => " + exception.Message, exception);
+            }
+        }
+
+        private string GetDefaultBranch(RepositoryTarget target, RepositoryRemoteKind remoteKind)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+
+            try
+            {
+                RemoteJsonResponse<RepoInfo> response = this.RequestJsonFromUrl<RepoInfo>(this.urlBuilder.BuildRepositoryInfoUrl(target, remoteKind));
                 if (response.Value != null && !string.IsNullOrWhiteSpace(response.Value.default_branch))
                 {
                     return response.Value.default_branch;
@@ -58,30 +90,25 @@ namespace UpdateClient.Remote
             {
             }
 
-            // falling back to common branch names.
             return AppOptions.CommonBranchNames[0];
         }
 
-        public RepositoryTreeResult GetRemoteTree(RepositoryTarget target)
+        private RepositoryTreeResult GetRemoteTree(RepositoryTarget target, RepositoryRemoteKind remoteKind)
         {
-            // validating input.
             if (target == null) throw new ArgumentNullException(nameof(target));
 
-            // building branch candidates.
             List<string> branchCandidates = new List<string>();
-            branchCandidates.Add(this.GetDefaultBranch(target));
+            branchCandidates.Add(this.GetDefaultBranch(target, remoteKind));
             branchCandidates.AddRange(AppOptions.CommonBranchNames);
 
-            return this.GetRemoteTree(target, branchCandidates);
+            return this.GetRemoteTree(target, branchCandidates, remoteKind);
         }
 
-        public RepositoryTreeResult GetRemoteTree(RepositoryTarget target, IEnumerable<string> branchCandidates)
+        private RepositoryTreeResult GetRemoteTree(RepositoryTarget target, IEnumerable<string> branchCandidates, RepositoryRemoteKind remoteKind)
         {
-            // validating input.
             if (target == null) throw new ArgumentNullException(nameof(target));
             if (branchCandidates == null) throw new ArgumentNullException(nameof(branchCandidates));
 
-            // walking candidate branches.
             List<string> errors = new List<string>();
             HashSet<string> seenBranches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -94,7 +121,8 @@ namespace UpdateClient.Remote
 
                 try
                 {
-                    RemoteJsonResponse<TreeResponse> response = this.RequestJsonFromUrls<TreeResponse>(this.urlBuilder.BuildRepositoryTreeUrls(target, branch));
+                    string url = this.urlBuilder.BuildRepositoryTreeUrl(target, branch, remoteKind);
+                    RemoteJsonResponse<TreeResponse> response = this.RequestJsonFromUrl<TreeResponse>(url);
                     TreeResponse tree = response.Value;
                     if (tree == null || tree.tree == null)
                     {
@@ -123,77 +151,58 @@ namespace UpdateClient.Remote
                 "Cannot read repository tree." + Environment.NewLine + string.Join(Environment.NewLine, errors.ToArray()));
         }
 
-        public string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath)
+        private void ProbeRawAccess(RepositoryTarget target, RepositoryTreeResult treeResult, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
         {
-            // validating input.
-            if (target == null) throw new ArgumentNullException(nameof(target));
-            if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Value cannot be empty.", nameof(branch));
-            if (entry == null) throw new ArgumentNullException(nameof(entry));
-            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
-            if (!string.Equals(entry.type, "blob", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Only blob entries can be downloaded.");
+            if (treeResult == null) throw new ArgumentNullException(nameof(treeResult));
 
-            // preparing temporary storage.
-            Directory.CreateDirectory(tempDirectoryPath);
-            List<string> errors = new List<string>();
+            TreeEntry probeEntry = treeResult.Tree
+                .Where(item =>
+                    item != null
+                    && string.Equals(item.type, "blob", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(item.path))
+                .OrderBy(item => item.size)
+                .FirstOrDefault();
 
-            foreach (string url in this.urlBuilder.BuildRepositoryRawUrls(target, branch, entry.path))
+            if (probeEntry == null)
             {
-                string tempPath = Path.Combine(tempDirectoryPath, Guid.NewGuid().ToString("N") + ".tmp");
+                return;
+            }
 
-                try
+            string tempPath = null;
+            try
+            {
+                tempPath = this.DownloadVerifiedFileToTemporaryPath(target, treeResult.Branch, probeEntry, tempDirectoryPath, remoteKind);
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(tempPath))
                 {
-                    this.DownloadToFile(url, tempPath);
-                    string actualSha = this.gitBlobHasher.ComputeForFile(tempPath);
-                    if (!string.Equals(actualSha, entry.sha, StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new InvalidOperationException(string.Format("Downloaded file SHA mismatch. Expected {0}, got {1}.", entry.sha, actualSha));
-                    }
-
-                    return tempPath;
-                }
-                catch (Exception exception)
-                {
-                    errors.Add(url + " => " + exception.Message);
                     this.TryDeleteFile(tempPath);
                 }
             }
-
-            throw new InvalidOperationException(
-                "All download attempts failed for " + entry.path + "." + Environment.NewLine + string.Join(Environment.NewLine, errors.ToArray()));
         }
 
-        private RemoteJsonResponse<T> RequestJsonFromUrls<T>(IEnumerable<string> urls)
+        private RemoteJsonResponse<T> RequestJsonFromUrl<T>(string url)
         {
-            // validating input.
-            if (urls == null) throw new ArgumentNullException(nameof(urls));
+            if (string.IsNullOrWhiteSpace(url)) throw new ArgumentException("Value cannot be empty.", nameof(url));
 
-            // querying upstream APIs.
-            List<string> errors = new List<string>();
-            foreach (string url in urls)
+            try
             {
-                try
-                {
-                    string content = this.DownloadString(url, AppOptions.ApiAcceptHeader);
-                    JavaScriptSerializer serializer = CreateSerializer();
-                    T value = serializer.Deserialize<T>(content);
-                    return new RemoteJsonResponse<T> { Url = url, Value = value };
-                }
-                catch (Exception exception)
-                {
-                    errors.Add(url + " => " + exception.Message);
-                }
+                string content = this.DownloadString(url, AppOptions.ApiAcceptHeader);
+                JavaScriptSerializer serializer = CreateSerializer();
+                T value = serializer.Deserialize<T>(content);
+                return new RemoteJsonResponse<T> { Url = url, Value = value };
             }
-
-            throw new InvalidOperationException(
-                "All upstream API requests failed." + Environment.NewLine + string.Join(Environment.NewLine, errors.ToArray()));
+            catch (Exception exception)
+            {
+                throw new InvalidOperationException(url + " => " + exception.Message, exception);
+            }
         }
 
         private string DownloadString(string url, string accept)
         {
-            // preparing request.
             HttpWebRequest request = this.CreateRequest(url, accept);
 
-            // reading response text.
             using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
             using (Stream stream = response.GetResponseStream())
             using (StreamReader reader = new StreamReader(EnsureStream(stream), Encoding.UTF8))
@@ -204,10 +213,8 @@ namespace UpdateClient.Remote
 
         private void DownloadToFile(string url, string destination)
         {
-            // preparing request.
             HttpWebRequest request = this.CreateRequest(url, AppOptions.BinaryAcceptHeader);
 
-            // streaming response body.
             using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
             using (Stream stream = response.GetResponseStream())
             using (FileStream fileStream = File.Open(destination, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -218,7 +225,6 @@ namespace UpdateClient.Remote
 
         private HttpWebRequest CreateRequest(string url, string accept)
         {
-            // creating web request.
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
             request.Method = "GET";
             request.UserAgent = AppOptions.RemoteUserAgent;
@@ -232,7 +238,6 @@ namespace UpdateClient.Remote
 
         private static JavaScriptSerializer CreateSerializer()
         {
-            // configuring JSON serializer.
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = int.MaxValue;
             serializer.RecursionLimit = 256;
@@ -241,7 +246,6 @@ namespace UpdateClient.Remote
 
         private static Stream EnsureStream(Stream stream)
         {
-            // validating response stream.
             if (stream == null)
             {
                 throw new InvalidOperationException("Remote endpoint returned no response stream.");
@@ -252,7 +256,6 @@ namespace UpdateClient.Remote
 
         private void TryDeleteFile(string path)
         {
-            // ignoring cleanup failures.
             if (!File.Exists(path))
             {
                 return;
