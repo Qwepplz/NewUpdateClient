@@ -193,6 +193,11 @@ namespace UpdateClient.App
                 this.activeLog.Attach();
                 this.activeLog.WriteSessionStart(targetDirectoryPath, args);
                 Console.WriteLine(string.Format("Log file: {0}", this.activeLog.CurrentLogPath));
+                LogArchiveService.TryArchivePreviousLogs(
+                    targetDirectoryPath,
+                    this.activeLog.CurrentLogPath,
+                    this.safePathService,
+                    this.activeLog.WriteLogOnlyLine);
             }
             catch
             {

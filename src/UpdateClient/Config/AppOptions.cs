@@ -12,6 +12,8 @@ namespace UpdateClient.Config
         public const string LogFilePrefix = "UpdateClient-";
         public const string LogFileDateFormat = "yyyy-MM-dd";
         public const string LogFileExtension = ".log";
+        public const string LogArchiveExtension = ".7z";
+        public const string LogArchiveTempExtension = ".tmp";
         public const string SyncStateFileName = "sync-state.json";
         public const string LegacyManifestFileName = "tracked-files.txt";
         public const string StagingArtifactMarker = ".__updateclient_sync_staging__";
