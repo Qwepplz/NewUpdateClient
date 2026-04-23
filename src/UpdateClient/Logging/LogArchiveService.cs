@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UpdateClient.Compression;
 using UpdateClient.Config;
@@ -16,42 +17,15 @@ namespace UpdateClient.Logging
             ISafePathService safePathService,
             Action<string> writeLogLine)
         {
-            if (string.IsNullOrWhiteSpace(targetDirectoryPath)
-                || string.IsNullOrWhiteSpace(currentLogPath)
-                || safePathService == null
-                || writeLogLine == null)
+            if (!CanArchivePreviousLogs(targetDirectoryPath, currentLogPath, safePathService, writeLogLine))
             {
                 return;
             }
-
-            string normalizedCurrentLogPath = safePathService.GetFullPath(currentLogPath);
-            string logDirectoryPath = safePathService.GetLogDirectoryPath(targetDirectoryPath);
-            if (!Directory.Exists(logDirectoryPath))
-            {
-                return;
-            }
-
-            string[] logFilePaths = Directory.GetFiles(
-                logDirectoryPath,
-                AppOptions.LogFilePrefix + "*" + AppOptions.LogFileExtension);
-
-            if (logFilePaths.Length == 0)
-            {
-                return;
-            }
-
-            Array.Sort(logFilePaths, StringComparer.OrdinalIgnoreCase);
 
             int archivedCount = 0;
-            foreach (string logFilePath in logFilePaths)
+            foreach (string logFilePath in GetArchiveCandidates(targetDirectoryPath, currentLogPath, safePathService))
             {
-                string fullLogPath = safePathService.GetFullPath(logFilePath);
-                if (string.Equals(fullLogPath, normalizedCurrentLogPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (TryArchiveSingleLog(targetDirectoryPath, fullLogPath, safePathService, writeLogLine))
+                if (TryArchiveSingleLog(targetDirectoryPath, logFilePath, safePathService, writeLogLine))
                 {
                     archivedCount++;
                 }
@@ -61,6 +35,49 @@ namespace UpdateClient.Logging
             {
                 writeLogLine("Archived previous log files: " + archivedCount);
             }
+        }
+
+        private static bool CanArchivePreviousLogs(
+            string targetDirectoryPath,
+            string currentLogPath,
+            ISafePathService safePathService,
+            Action<string> writeLogLine)
+        {
+            return !string.IsNullOrWhiteSpace(targetDirectoryPath)
+                && !string.IsNullOrWhiteSpace(currentLogPath)
+                && safePathService != null
+                && writeLogLine != null;
+        }
+
+        private static string[] GetArchiveCandidates(
+            string targetDirectoryPath,
+            string currentLogPath,
+            ISafePathService safePathService)
+        {
+            string normalizedCurrentLogPath = safePathService.GetFullPath(currentLogPath);
+            string logDirectoryPath = safePathService.GetLogDirectoryPath(targetDirectoryPath);
+            if (!Directory.Exists(logDirectoryPath))
+            {
+                return new string[0];
+            }
+
+            string[] logFilePaths = Directory.GetFiles(
+                logDirectoryPath,
+                AppOptions.LogFilePrefix + "*" + AppOptions.LogFileExtension);
+
+            Array.Sort(logFilePaths, StringComparer.OrdinalIgnoreCase);
+
+            List<string> archiveCandidates = new List<string>();
+            foreach (string logFilePath in logFilePaths)
+            {
+                string fullLogPath = safePathService.GetFullPath(logFilePath);
+                if (!string.Equals(fullLogPath, normalizedCurrentLogPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    archiveCandidates.Add(fullLogPath);
+                }
+            }
+
+            return archiveCandidates.ToArray();
         }
 
         private static bool TryArchiveSingleLog(

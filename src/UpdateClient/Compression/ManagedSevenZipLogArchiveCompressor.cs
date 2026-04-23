@@ -31,15 +31,7 @@ namespace UpdateClient.Compression
 
         public void CompressToArchive(string sourcePath, string archivePath)
         {
-            if (string.IsNullOrWhiteSpace(sourcePath))
-            {
-                throw new ArgumentException("Source path is required.", nameof(sourcePath));
-            }
-
-            if (string.IsNullOrWhiteSpace(archivePath))
-            {
-                throw new ArgumentException("Archive path is required.", nameof(archivePath));
-            }
+            ValidateCompressionArguments(sourcePath, archivePath);
 
             FileInfo sourceFileInfo = new FileInfo(sourcePath);
             if (!sourceFileInfo.Exists)
@@ -61,6 +53,19 @@ namespace UpdateClient.Compression
                     encoder,
                     coderProperties,
                     archiveStream);
+            }
+        }
+
+        private static void ValidateCompressionArguments(string sourcePath, string archivePath)
+        {
+            if (string.IsNullOrWhiteSpace(sourcePath))
+            {
+                throw new ArgumentException("Source path is required.", nameof(sourcePath));
+            }
+
+            if (string.IsNullOrWhiteSpace(archivePath))
+            {
+                throw new ArgumentException("Archive path is required.", nameof(archivePath));
             }
         }
 

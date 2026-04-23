@@ -36,8 +36,7 @@ namespace UpdateClient.Remote
 
         public RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
         {
-            if (target == null) throw new ArgumentNullException(nameof(target));
-            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
+            ValidatePrepareRepositoryTreeArguments(target, tempDirectoryPath);
 
             RepositoryTreeResult treeResult = this.GetRemoteTree(target, remoteKind);
             this.ProbeRawAccess(target, treeResult, tempDirectoryPath, remoteKind);
@@ -46,11 +45,7 @@ namespace UpdateClient.Remote
 
         public string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
         {
-            if (target == null) throw new ArgumentNullException(nameof(target));
-            if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Value cannot be empty.", nameof(branch));
-            if (entry == null) throw new ArgumentNullException(nameof(entry));
-            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
-            if (!string.Equals(entry.type, "blob", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Only blob entries can be downloaded.");
+            ValidateDownloadArguments(target, branch, entry, tempDirectoryPath);
 
             Directory.CreateDirectory(tempDirectoryPath);
             string url = this.urlBuilder.BuildRepositoryRawUrl(target, branch, entry.path, remoteKind);
@@ -95,7 +90,7 @@ namespace UpdateClient.Remote
 
         private RepositoryTreeResult GetRemoteTree(RepositoryTarget target, RepositoryRemoteKind remoteKind)
         {
-            if (target == null) throw new ArgumentNullException(nameof(target));
+            ValidateGetRemoteTreeArguments(target);
 
             List<string> branchCandidates = new List<string>();
             branchCandidates.Add(this.GetDefaultBranch(target, remoteKind));
@@ -106,8 +101,7 @@ namespace UpdateClient.Remote
 
         private RepositoryTreeResult GetRemoteTree(RepositoryTarget target, IEnumerable<string> branchCandidates, RepositoryRemoteKind remoteKind)
         {
-            if (target == null) throw new ArgumentNullException(nameof(target));
-            if (branchCandidates == null) throw new ArgumentNullException(nameof(branchCandidates));
+            ValidateGetRemoteTreeArguments(target, branchCandidates);
 
             List<string> errors = new List<string>();
             HashSet<string> seenBranches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -234,6 +228,32 @@ namespace UpdateClient.Remote
             request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
             request.Proxy = WebRequest.DefaultWebProxy;
             return request;
+        }
+
+        private static void ValidatePrepareRepositoryTreeArguments(RepositoryTarget target, string tempDirectoryPath)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
+        }
+
+        private static void ValidateDownloadArguments(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Value cannot be empty.", nameof(branch));
+            if (entry == null) throw new ArgumentNullException(nameof(entry));
+            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
+            if (!string.Equals(entry.type, "blob", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Only blob entries can be downloaded.");
+        }
+
+        private static void ValidateGetRemoteTreeArguments(RepositoryTarget target)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+        }
+
+        private static void ValidateGetRemoteTreeArguments(RepositoryTarget target, IEnumerable<string> branchCandidates)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            if (branchCandidates == null) throw new ArgumentNullException(nameof(branchCandidates));
         }
 
         private static JavaScriptSerializer CreateSerializer()

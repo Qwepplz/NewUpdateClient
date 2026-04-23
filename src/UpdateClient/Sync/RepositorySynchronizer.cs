@@ -27,6 +27,33 @@ namespace UpdateClient.Sync
         private readonly ISyncStateStore syncStateStore;
         private readonly IGitBlobHasher gitBlobHasher;
 
+        private sealed class SynchronizationContext
+        {
+            internal RepositoryTarget Target { get; set; }
+            internal RepositoryTreeResult TreeResult { get; set; }
+            internal RepositoryRemoteKind RemoteKind { get; set; }
+            internal string TargetDirectoryPath { get; set; }
+            internal string TargetHash { get; set; }
+            internal string TempRootDirectoryPath { get; set; }
+            internal LogSession ActiveLog { get; set; }
+            internal SyncSummary Summary { get; private set; }
+            internal HashSet<string> ProtectedPaths { get; set; }
+            internal string StateDirectoryPath { get; set; }
+            internal string ManifestPath { get; set; }
+            internal ImportedSyncState ImportedState { get; set; }
+            internal Dictionary<string, CachedFileState> CachedFiles { get; set; }
+            internal Dictionary<string, CachedFileState> NewCachedFiles { get; set; }
+            internal Dictionary<string, TreeEntry> RemoteFiles { get; set; }
+            internal Dictionary<string, TreeEntry> ExcludedFiles { get; set; }
+            internal List<string> NewManifest { get; set; }
+            internal TextWriter ProgressWriter { get; set; }
+
+            internal SynchronizationContext()
+            {
+                this.Summary = new SyncSummary();
+            }
+        }
+
         public RepositorySynchronizer(
             IRemoteRepositoryClient remoteRepositoryClient,
             ISafePathService safePathService,
@@ -49,6 +76,21 @@ namespace UpdateClient.Sync
 
         public SyncSummary Synchronize(RepositoryTarget target, RepositoryTreeResult treeResult, RepositoryRemoteKind remoteKind, string targetDirectoryPath, string targetHash, string tempRootDirectoryPath, LogSession activeLog)
         {
+            SynchronizationContext context = this.CreateContext(target, treeResult, remoteKind, targetDirectoryPath, targetHash, tempRootDirectoryPath, activeLog);
+
+            this.PrepareWorkingState(context);
+            PrintRepositoryAccessReady(context);
+            this.ClassifyRemoteEntries(context);
+            this.RemoveExcludedRootFilesWhenSafe(context);
+            this.DownloadAndUpdateFiles(context);
+            this.RemoveUpstreamDeletedFiles(context);
+            this.PersistState(context);
+
+            return context.Summary;
+        }
+
+        private SynchronizationContext CreateContext(RepositoryTarget target, RepositoryTreeResult treeResult, RepositoryRemoteKind remoteKind, string targetDirectoryPath, string targetHash, string tempRootDirectoryPath, LogSession activeLog)
+        {
             if (target == null) throw new ArgumentNullException(nameof(target));
             if (treeResult == null) throw new ArgumentNullException(nameof(treeResult));
             if (treeResult.Tree == null) throw new InvalidOperationException("Repository tree is not available.");
@@ -56,36 +98,54 @@ namespace UpdateClient.Sync
             if (string.IsNullOrWhiteSpace(targetHash)) throw new ArgumentException("Value cannot be empty.", nameof(targetHash));
             if (string.IsNullOrWhiteSpace(tempRootDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempRootDirectoryPath));
 
-            SyncSummary summary = new SyncSummary();
-
-            HashSet<string> protectedPaths = this.safePathService.BuildProtectedPathSet(targetDirectoryPath);
-            summary.StaleArtifactsRemoved = this.safePathService.RemoveStaleUpdaterArtifacts(targetDirectoryPath, protectedPaths);
-            if (summary.StaleArtifactsRemoved > 0)
+            return new SynchronizationContext
             {
-                Console.WriteLine(string.Format("Cleaned leftover temp files: {0}", summary.StaleArtifactsRemoved));
+                Target = target,
+                TreeResult = treeResult,
+                RemoteKind = remoteKind,
+                TargetDirectoryPath = targetDirectoryPath,
+                TargetHash = targetHash,
+                TempRootDirectoryPath = tempRootDirectoryPath,
+                ActiveLog = activeLog
+            };
+        }
+
+        private void PrepareWorkingState(SynchronizationContext context)
+        {
+            context.ProtectedPaths = this.safePathService.BuildProtectedPathSet(context.TargetDirectoryPath);
+            context.Summary.StaleArtifactsRemoved = this.safePathService.RemoveStaleUpdaterArtifacts(context.TargetDirectoryPath, context.ProtectedPaths);
+            if (context.Summary.StaleArtifactsRemoved > 0)
+            {
+                Console.WriteLine(string.Format("Cleaned leftover temp files: {0}", context.Summary.StaleArtifactsRemoved));
             }
 
-            string stateDirectoryPath = this.syncStateStore.GetStateDirectory(targetDirectoryPath, targetHash);
-            string manifestPath = this.syncStateStore.GetLegacyManifestPath(stateDirectoryPath);
+            context.StateDirectoryPath = this.syncStateStore.GetStateDirectory(context.TargetDirectoryPath, context.TargetHash);
+            context.ManifestPath = this.syncStateStore.GetLegacyManifestPath(context.StateDirectoryPath);
+        }
 
+        private static void PrintRepositoryAccessReady(SynchronizationContext context)
+        {
             Console.WriteLine("[1/4] Repository access ready...");
-            summary.Branch = treeResult.Branch;
-            summary.Source = treeResult.Source;
-            Console.WriteLine(string.Format("       Branch: {0}", summary.Branch));
-            Console.WriteLine(string.Format("       Source: {0}", summary.Source));
+            context.Summary.Branch = context.TreeResult.Branch;
+            context.Summary.Source = context.TreeResult.Source;
+            Console.WriteLine(string.Format("       Branch: {0}", context.Summary.Branch));
+            Console.WriteLine(string.Format("       Source: {0}", context.Summary.Source));
+        }
 
-            ImportedSyncState importedState = this.syncStateStore.Import(stateDirectoryPath);
-            if (importedState.CacheUnreadable)
+        private void ClassifyRemoteEntries(SynchronizationContext context)
+        {
+            context.ImportedState = this.syncStateStore.Import(context.StateDirectoryPath);
+            if (context.ImportedState.CacheUnreadable)
             {
                 Console.WriteLine("       Sync cache unreadable. Rebuilding...");
             }
 
-            Dictionary<string, CachedFileState> cachedFiles = importedState.Files;
-            Dictionary<string, CachedFileState> newCachedFiles = new Dictionary<string, CachedFileState>(StringComparer.OrdinalIgnoreCase);
-            Dictionary<string, TreeEntry> remoteFiles = new Dictionary<string, TreeEntry>(StringComparer.OrdinalIgnoreCase);
-            Dictionary<string, TreeEntry> excludedFiles = new Dictionary<string, TreeEntry>(StringComparer.OrdinalIgnoreCase);
+            context.CachedFiles = context.ImportedState.Files;
+            context.NewCachedFiles = new Dictionary<string, CachedFileState>(StringComparer.OrdinalIgnoreCase);
+            context.RemoteFiles = new Dictionary<string, TreeEntry>(StringComparer.OrdinalIgnoreCase);
+            context.ExcludedFiles = new Dictionary<string, TreeEntry>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (TreeEntry entry in treeResult.Tree)
+            foreach (TreeEntry entry in context.TreeResult.Tree)
             {
                 if (!string.Equals(entry.type, "blob", StringComparison.OrdinalIgnoreCase))
                 {
@@ -95,29 +155,32 @@ namespace UpdateClient.Sync
                 string relativePath = this.safePathService.NormalizeRelativePath(entry.path);
                 if (IsExcludedRootFile(relativePath))
                 {
-                    excludedFiles[relativePath] = entry;
+                    context.ExcludedFiles[relativePath] = entry;
                 }
                 else
                 {
-                    remoteFiles[relativePath] = entry;
+                    context.RemoteFiles[relativePath] = entry;
                 }
             }
+        }
 
+        private void RemoveExcludedRootFilesWhenSafe(SynchronizationContext context)
+        {
             Console.WriteLine("[2/4] Removing repo README/LICENSE when safe...");
-            foreach (string relativePath in SortKeys(excludedFiles.Keys))
+            foreach (string relativePath in SortKeys(context.ExcludedFiles.Keys))
             {
-                TreeEntry entry = excludedFiles[relativePath];
-                string destinationPath = this.safePathService.GetTargetPathFromRelative(targetDirectoryPath, relativePath);
+                TreeEntry entry = context.ExcludedFiles[relativePath];
+                string destinationPath = this.safePathService.GetTargetPathFromRelative(context.TargetDirectoryPath, relativePath);
                 string destinationFullPath = this.safePathService.GetFullPath(destinationPath);
 
-                if (protectedPaths.Contains(destinationFullPath) || !File.Exists(destinationPath))
+                if (context.ProtectedPaths.Contains(destinationFullPath) || !File.Exists(destinationPath))
                 {
                     continue;
                 }
 
-                this.safePathService.AssertSafeManagedPath(targetDirectoryPath, destinationPath);
+                this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, destinationPath);
 
-                bool matchesRemote = this.syncStateStore.MatchesCachedRemote(relativePath, destinationPath, entry, cachedFiles);
+                bool matchesRemote = this.syncStateStore.MatchesCachedRemote(relativePath, destinationPath, entry, context.CachedFiles);
                 if (!matchesRemote)
                 {
                     matchesRemote = this.gitBlobHasher.MatchesRemoteBlob(destinationPath, entry);
@@ -126,95 +189,94 @@ namespace UpdateClient.Sync
                 if (matchesRemote)
                 {
                     File.Delete(destinationPath);
-                    this.safePathService.RemoveEmptyParentDirectories(destinationPath, targetDirectoryPath);
-                    WriteLogOnlyLine(activeLog, "Removed README/LICENSE file: " + relativePath);
+                    this.safePathService.RemoveEmptyParentDirectories(destinationPath, context.TargetDirectoryPath);
+                    WriteLogOnlyLine(context.ActiveLog, "Removed README/LICENSE file: " + relativePath);
                 }
                 else
                 {
-                    WriteLogOnlyLine(activeLog, "Kept local README/LICENSE file: " + relativePath);
+                    WriteLogOnlyLine(context.ActiveLog, "Kept local README/LICENSE file: " + relativePath);
                 }
             }
+        }
 
+        private void DownloadAndUpdateFiles(SynchronizationContext context)
+        {
             Console.WriteLine("[3/4] Downloading and updating files...");
-            List<string> newManifest = new List<string>();
-            List<string> sortedRemoteFiles = SortKeys(remoteFiles.Keys);
-            TextWriter progressWriter = activeLog == null ? Console.Out : activeLog.ConsoleWriter;
+            context.NewManifest = new List<string>();
+            List<string> sortedRemoteFiles = SortKeys(context.RemoteFiles.Keys);
+            context.ProgressWriter = context.ActiveLog == null ? Console.Out : context.ActiveLog.ConsoleWriter;
 
-            using (ProgressDisplay progress = new ProgressDisplay(progressWriter, ProgressDisplay.CanRefresh()))
+            using (ProgressDisplay progress = new ProgressDisplay(context.ProgressWriter, ProgressDisplay.CanRefresh()))
             {
                 for (int index = 0; index < sortedRemoteFiles.Count; index++)
                 {
                     string relativePath = sortedRemoteFiles[index];
-                    TreeEntry entry = remoteFiles[relativePath];
-                    string destinationPath = this.safePathService.GetTargetPathFromRelative(targetDirectoryPath, relativePath);
+                    TreeEntry entry = context.RemoteFiles[relativePath];
+                    string destinationPath = this.safePathService.GetTargetPathFromRelative(context.TargetDirectoryPath, relativePath);
                     string destinationFullPath = this.safePathService.GetFullPath(destinationPath);
 
                     progress.Update(
-                        FormatProgressStatus("[3/4] Files", index + 1, sortedRemoteFiles.Count, string.Format("added: {0} updated: {1} unchanged: {2} | checking", summary.Added, summary.Updated, summary.Unchanged)),
+                        FormatProgressStatus("[3/4] Files", index + 1, sortedRemoteFiles.Count, string.Format("added: {0} updated: {1} unchanged: {2} | checking", context.Summary.Added, context.Summary.Updated, context.Summary.Unchanged)),
                         FormatProgressBarLine(index + 1, sortedRemoteFiles.Count));
 
-                    if (protectedPaths.Contains(destinationFullPath))
+                    if (context.ProtectedPaths.Contains(destinationFullPath))
                     {
-                        WriteLogOnlyLine(activeLog, "Skipped protected updater file: " + relativePath);
+                        WriteLogOnlyLine(context.ActiveLog, "Skipped protected updater file: " + relativePath);
                         continue;
                     }
 
-                    newManifest.Add(relativePath);
-                    this.safePathService.AssertSafeManagedPath(targetDirectoryPath, destinationPath);
+                    context.NewManifest.Add(relativePath);
+                    this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, destinationPath);
                     this.safePathService.AssertNoDirectoryConflict(destinationPath);
 
-                    if (this.syncStateStore.MatchesCachedRemote(relativePath, destinationPath, entry, cachedFiles))
+                    if (this.syncStateStore.MatchesCachedRemote(relativePath, destinationPath, entry, context.CachedFiles))
                     {
-                        newCachedFiles[relativePath] = this.syncStateStore.CreateLocalFileState(relativePath, destinationPath, entry.sha);
-                        summary.Unchanged++;
-                        WriteLogOnlyLine(activeLog, "Cached match: " + relativePath);
+                        context.NewCachedFiles[relativePath] = this.syncStateStore.CreateLocalFileState(relativePath, destinationPath, entry.sha);
+                        context.Summary.Unchanged++;
+                        WriteLogOnlyLine(context.ActiveLog, "Cached match: " + relativePath);
                         continue;
                     }
 
                     bool existed = File.Exists(destinationPath);
                     if (existed && this.gitBlobHasher.MatchesRemoteBlob(destinationPath, entry))
                     {
-                        newCachedFiles[relativePath] = this.syncStateStore.CreateLocalFileState(relativePath, destinationPath, entry.sha);
-                        summary.Unchanged++;
-                        WriteLogOnlyLine(activeLog, "Verified match: " + relativePath);
+                        context.NewCachedFiles[relativePath] = this.syncStateStore.CreateLocalFileState(relativePath, destinationPath, entry.sha);
+                        context.Summary.Unchanged++;
+                        WriteLogOnlyLine(context.ActiveLog, "Verified match: " + relativePath);
                         continue;
                     }
 
                     progress.Update(
-                        FormatProgressStatus("[3/4] Files", index + 1, sortedRemoteFiles.Count, string.Format("added: {0} updated: {1} unchanged: {2} | downloading", summary.Added, summary.Updated, summary.Unchanged)),
+                        FormatProgressStatus("[3/4] Files", index + 1, sortedRemoteFiles.Count, string.Format("added: {0} updated: {1} unchanged: {2} | downloading", context.Summary.Added, context.Summary.Updated, context.Summary.Unchanged)),
                         FormatProgressBarLine(index + 1, sortedRemoteFiles.Count));
 
-                    this.DownloadRemoteFile(target, treeResult.Branch, entry, tempRootDirectoryPath, destinationPath, remoteKind);
-                    newCachedFiles[relativePath] = this.syncStateStore.CreateLocalFileState(relativePath, destinationPath, entry.sha);
+                    this.DownloadRemoteFile(context.Target, context.TreeResult.Branch, entry, context.TempRootDirectoryPath, destinationPath, context.RemoteKind);
+                    context.NewCachedFiles[relativePath] = this.syncStateStore.CreateLocalFileState(relativePath, destinationPath, entry.sha);
 
                     if (existed)
                     {
-                        summary.Updated++;
-                        WriteLogOnlyLine(activeLog, "Updated: " + relativePath);
+                        context.Summary.Updated++;
+                        WriteLogOnlyLine(context.ActiveLog, "Updated: " + relativePath);
                     }
                     else
                     {
-                        summary.Added++;
-                        WriteLogOnlyLine(activeLog, "Added: " + relativePath);
+                        context.Summary.Added++;
+                        WriteLogOnlyLine(context.ActiveLog, "Added: " + relativePath);
                     }
                 }
 
                 progress.Complete(
-                    FormatProgressStatus("[3/4] Files", sortedRemoteFiles.Count, sortedRemoteFiles.Count, string.Format("added: {0} updated: {1} unchanged: {2}", summary.Added, summary.Updated, summary.Unchanged)),
+                    FormatProgressStatus("[3/4] Files", sortedRemoteFiles.Count, sortedRemoteFiles.Count, string.Format("added: {0} updated: {1} unchanged: {2}", context.Summary.Added, context.Summary.Updated, context.Summary.Unchanged)),
                     FormatProgressBarLine(sortedRemoteFiles.Count, sortedRemoteFiles.Count));
             }
+        }
 
+        private void RemoveUpstreamDeletedFiles(SynchronizationContext context)
+        {
             Console.WriteLine("[4/4] Removing files deleted upstream...");
-            List<string> oldManifest = new List<string>(importedState.TrackedFiles);
-            if (oldManifest.Count == 0 && File.Exists(manifestPath))
-            {
-                oldManifest = File.ReadAllLines(manifestPath)
-                    .Where(item => !string.IsNullOrWhiteSpace(item))
-                    .Select(this.safePathService.NormalizeRelativePath)
-                    .ToList();
-            }
+            List<string> oldManifest = this.ReadOldManifest(context);
 
-            HashSet<string> remoteSet = new HashSet<string>(newManifest, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> remoteSet = new HashSet<string>(context.NewManifest, StringComparer.OrdinalIgnoreCase);
             foreach (string relativePath in oldManifest)
             {
                 if (remoteSet.Contains(relativePath))
@@ -222,25 +284,41 @@ namespace UpdateClient.Sync
                     continue;
                 }
 
-                string destinationPath = this.safePathService.GetTargetPathFromRelative(targetDirectoryPath, relativePath);
+                string destinationPath = this.safePathService.GetTargetPathFromRelative(context.TargetDirectoryPath, relativePath);
                 string destinationFullPath = this.safePathService.GetFullPath(destinationPath);
 
-                if (protectedPaths.Contains(destinationFullPath) || !File.Exists(destinationPath))
+                if (context.ProtectedPaths.Contains(destinationFullPath) || !File.Exists(destinationPath))
                 {
                     continue;
                 }
 
-                this.safePathService.AssertSafeManagedPath(targetDirectoryPath, destinationPath);
+                this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, destinationPath);
                 File.Delete(destinationPath);
-                this.safePathService.RemoveEmptyParentDirectories(destinationPath, targetDirectoryPath);
-                summary.Removed++;
-                WriteLogOnlyLine(activeLog, "Removed upstream-deleted file: " + relativePath);
+                this.safePathService.RemoveEmptyParentDirectories(destinationPath, context.TargetDirectoryPath);
+                context.Summary.Removed++;
+                WriteLogOnlyLine(context.ActiveLog, "Removed upstream-deleted file: " + relativePath);
+            }
+        }
+
+        private void PersistState(SynchronizationContext context)
+        {
+            List<string> sortedManifest = context.NewManifest.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList();
+            File.WriteAllLines(context.ManifestPath, sortedManifest.ToArray(), new UTF8Encoding(false));
+            this.syncStateStore.Export(context.StateDirectoryPath, sortedManifest, context.NewCachedFiles);
+        }
+
+        private List<string> ReadOldManifest(SynchronizationContext context)
+        {
+            List<string> oldManifest = new List<string>(context.ImportedState.TrackedFiles);
+            if (oldManifest.Count == 0 && File.Exists(context.ManifestPath))
+            {
+                oldManifest = File.ReadAllLines(context.ManifestPath)
+                    .Where(item => !string.IsNullOrWhiteSpace(item))
+                    .Select(this.safePathService.NormalizeRelativePath)
+                    .ToList();
             }
 
-            List<string> sortedManifest = newManifest.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList();
-            File.WriteAllLines(manifestPath, sortedManifest.ToArray(), new UTF8Encoding(false));
-            this.syncStateStore.Export(stateDirectoryPath, sortedManifest, newCachedFiles);
-            return summary;
+            return oldManifest;
         }
 
         private void DownloadRemoteFile(RepositoryTarget target, string branch, TreeEntry entry, string tempRootDirectoryPath, string destinationPath, RepositoryRemoteKind remoteKind)

@@ -21,6 +21,41 @@ namespace UpdateClient.App
         private readonly IRepositorySynchronizer repositorySynchronizer;
         private LogSession activeLog;
 
+        private sealed class RunContext
+        {
+            private RunContext(string targetDirectoryPath, string targetHash)
+            {
+                this.TargetDirectoryPath = targetDirectoryPath;
+                this.TargetHash = targetHash;
+            }
+
+            internal string TargetDirectoryPath { get; private set; }
+
+            internal string TargetHash { get; private set; }
+
+            internal string TempRootDirectoryPath { get; private set; }
+
+            internal static RunContext Create(
+                string targetDirectoryPath,
+                ISafePathService safePathService,
+                ISyncStateStore syncStateStore)
+            {
+                if (safePathService == null) throw new ArgumentNullException(nameof(safePathService));
+                if (syncStateStore == null) throw new ArgumentNullException(nameof(syncStateStore));
+
+                string normalizedTargetDirectoryPath = safePathService.GetFullPath(targetDirectoryPath);
+                string targetHash = syncStateStore.GetTargetHash(normalizedTargetDirectoryPath);
+
+                return new RunContext(normalizedTargetDirectoryPath, targetHash);
+            }
+
+            internal void CreateTempRootDirectory()
+            {
+                this.TempRootDirectoryPath = Path.Combine(Path.GetTempPath(), "UpdateClientSync_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(this.TempRootDirectoryPath);
+            }
+        }
+
         public UpdateClientApplication()
         {
             ISafePathService safePathService = new SafePathService();
@@ -68,7 +103,7 @@ namespace UpdateClient.App
             string targetDirectoryPath = this.safePathService.GetFullPath(
                 AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
 
-            string tempRootDirectoryPath = null;
+            RunContext context = null;
             SyncMutexHandle mutexHandle = null;
             this.TryInitializeLogging(targetDirectoryPath, args);
 
@@ -76,50 +111,26 @@ namespace UpdateClient.App
             {
                 if (!this.startupMenu.ShowStartupPrompt(targetDirectoryPath, AppOptions.Betterbot))
                 {
-                    this.startupMenu.PauseBeforeExit();
-                    return 0;
+                    return this.ExitWithoutSynchronization();
                 }
 
-                string targetHash = this.syncStateStore.GetTargetHash(targetDirectoryPath);
-                mutexHandle = SyncMutexHandle.Acquire(targetHash);
-
-                tempRootDirectoryPath = Path.Combine(Path.GetTempPath(), "UpdateClientSync_" + Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(tempRootDirectoryPath);
+                context = RunContext.Create(targetDirectoryPath, this.safePathService, this.syncStateStore);
+                mutexHandle = SyncMutexHandle.Acquire(context.TargetHash);
+                context.CreateTempRootDirectory();
 
                 RepositoryTreeResult preparedTree;
                 RepositoryRemoteKind remoteKind;
-                if (!this.TryPrepareRepositoryTree(AppOptions.Betterbot, tempRootDirectoryPath, out preparedTree, out remoteKind))
+                if (!this.TryPrepareRepositoryTree(AppOptions.Betterbot, context.TempRootDirectoryPath, out preparedTree, out remoteKind))
                 {
-                    this.startupMenu.PauseBeforeExit();
-                    return 0;
+                    return this.ExitWithoutSynchronization();
                 }
 
-                SyncSummary summary = this.repositorySynchronizer.Synchronize(
-                    AppOptions.Betterbot,
-                    preparedTree,
-                    remoteKind,
-                    targetDirectoryPath,
-                    targetHash,
-                    tempRootDirectoryPath,
-                    this.activeLog);
-
-                Console.WriteLine();
-                Console.WriteLine("Sync complete.");
-                Console.WriteLine(string.Format("Added: {0}", summary.Added));
-                Console.WriteLine(string.Format("Updated: {0}", summary.Updated));
-                Console.WriteLine(string.Format("Removed: {0}", summary.Removed));
-                Console.WriteLine(string.Format("Unchanged: {0}", summary.Unchanged));
-                this.startupMenu.PauseBeforeExit();
-                return 0;
+                SyncSummary summary = this.SynchronizeRepository(context, preparedTree, remoteKind);
+                return this.CompleteRun(summary);
             }
             catch (Exception exception)
             {
-                Console.WriteLine();
-                Console.WriteLine("Sync failed.");
-                Console.WriteLine(exception.Message);
-                this.LogException(exception);
-                this.startupMenu.PauseBeforeExit();
-                return 1;
+                return this.FailRun(exception);
             }
             finally
             {
@@ -128,18 +139,67 @@ namespace UpdateClient.App
                     mutexHandle.Dispose();
                 }
 
-                if (!string.IsNullOrWhiteSpace(tempRootDirectoryPath) && Directory.Exists(tempRootDirectoryPath))
-                {
-                    try
-                    {
-                        Directory.Delete(tempRootDirectoryPath, true);
-                    }
-                    catch
-                    {
-                    }
-                }
-
+                CleanupRun(context);
                 this.ShutdownLogging();
+            }
+        }
+
+        private int ExitWithoutSynchronization()
+        {
+            this.startupMenu.PauseBeforeExit();
+            return 0;
+        }
+
+        private SyncSummary SynchronizeRepository(
+            RunContext context,
+            RepositoryTreeResult preparedTree,
+            RepositoryRemoteKind remoteKind)
+        {
+            return this.repositorySynchronizer.Synchronize(
+                AppOptions.Betterbot,
+                preparedTree,
+                remoteKind,
+                context.TargetDirectoryPath,
+                context.TargetHash,
+                context.TempRootDirectoryPath,
+                this.activeLog);
+        }
+
+        private int CompleteRun(SyncSummary summary)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Sync complete.");
+            Console.WriteLine(string.Format("Added: {0}", summary.Added));
+            Console.WriteLine(string.Format("Updated: {0}", summary.Updated));
+            Console.WriteLine(string.Format("Removed: {0}", summary.Removed));
+            Console.WriteLine(string.Format("Unchanged: {0}", summary.Unchanged));
+            this.startupMenu.PauseBeforeExit();
+            return 0;
+        }
+
+        private int FailRun(Exception exception)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Sync failed.");
+            Console.WriteLine(exception.Message);
+            this.LogException(exception);
+            this.startupMenu.PauseBeforeExit();
+            return 1;
+        }
+
+        private static void CleanupRun(RunContext context)
+        {
+            if (context == null || string.IsNullOrWhiteSpace(context.TempRootDirectoryPath) || !Directory.Exists(context.TempRootDirectoryPath))
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.Delete(context.TempRootDirectoryPath, true);
+            }
+            catch
+            {
             }
         }
 

@@ -36,10 +36,15 @@ namespace UpdateClient.FileSystem
 
     internal sealed class SafePathService : ISafePathService
     {
+        private static string GetValidatedFullPath(string path, string paramName)
+        {
+            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value cannot be empty.", paramName);
+            return Path.GetFullPath(path);
+        }
+
         public string GetFullPath(string path)
         {
-            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value cannot be empty.", nameof(path));
-            return Path.GetFullPath(path);
+            return GetValidatedFullPath(path, nameof(path));
         }
 
         public string NormalizeRelativePath(string path)
@@ -118,6 +123,15 @@ namespace UpdateClient.FileSystem
             return protectedPaths;
         }
 
+        public void AssertNoDirectoryConflict(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value cannot be empty.", nameof(path));
+            if (Directory.Exists(path))
+            {
+                throw new InvalidOperationException("Cannot place file because a directory exists at: " + path);
+            }
+        }
+
         public int RemoveStaleUpdaterArtifacts(string targetDirectoryPath, ISet<string> protectedPaths)
         {
             if (string.IsNullOrWhiteSpace(targetDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(targetDirectoryPath));
@@ -151,12 +165,28 @@ namespace UpdateClient.FileSystem
             return removedCount;
         }
 
-        public void AssertNoDirectoryConflict(string path)
+        public void RemoveEmptyParentDirectories(string filePath, string stopAtDirectoryPath)
         {
-            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value cannot be empty.", nameof(path));
-            if (Directory.Exists(path))
+            if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("Value cannot be empty.", nameof(filePath));
+
+            string stopFullPath = GetValidatedFullPath(stopAtDirectoryPath, nameof(stopAtDirectoryPath)).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string currentDirectoryPath = Path.GetDirectoryName(filePath);
+
+            while (!string.IsNullOrEmpty(currentDirectoryPath))
             {
-                throw new InvalidOperationException("Cannot place file because a directory exists at: " + path);
+                string currentFullPath = this.GetFullPath(currentDirectoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (currentFullPath.Length <= stopFullPath.Length)
+                {
+                    break;
+                }
+
+                if (Directory.EnumerateFileSystemEntries(currentFullPath).Any())
+                {
+                    break;
+                }
+
+                Directory.Delete(currentFullPath, false);
+                currentDirectoryPath = Path.GetDirectoryName(currentFullPath);
             }
         }
 
@@ -214,11 +244,8 @@ namespace UpdateClient.FileSystem
 
         public void AssertSafeManagedPath(string targetDirectoryPath, string path)
         {
-            if (string.IsNullOrWhiteSpace(targetDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(targetDirectoryPath));
-            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value cannot be empty.", nameof(path));
-
-            string targetRoot = this.GetFullPath(targetDirectoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string fullPath = this.GetFullPath(path);
+            string targetRoot = GetValidatedFullPath(targetDirectoryPath, nameof(targetDirectoryPath)).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullPath = GetValidatedFullPath(path, nameof(path));
 
             if (!this.IsPathWithinTarget(targetRoot, fullPath))
             {
@@ -262,32 +289,6 @@ namespace UpdateClient.FileSystem
 
             string prefix = normalizedTarget + Path.DirectorySeparatorChar;
             return normalizedFullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-        }
-
-        public void RemoveEmptyParentDirectories(string filePath, string stopAtDirectoryPath)
-        {
-            if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("Value cannot be empty.", nameof(filePath));
-            if (string.IsNullOrWhiteSpace(stopAtDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(stopAtDirectoryPath));
-
-            string stopFullPath = this.GetFullPath(stopAtDirectoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string currentDirectoryPath = Path.GetDirectoryName(filePath);
-
-            while (!string.IsNullOrEmpty(currentDirectoryPath))
-            {
-                string currentFullPath = this.GetFullPath(currentDirectoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                if (currentFullPath.Length <= stopFullPath.Length)
-                {
-                    break;
-                }
-
-                if (Directory.EnumerateFileSystemEntries(currentFullPath).Any())
-                {
-                    break;
-                }
-
-                Directory.Delete(currentFullPath, false);
-                currentDirectoryPath = Path.GetDirectoryName(currentFullPath);
-            }
         }
     }
 }
