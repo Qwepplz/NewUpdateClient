@@ -16,7 +16,7 @@ namespace UpdateClient.ConsoleUi
                 {
                     this.ShowMainMenu(targetDirectoryPath);
                     ConsoleKeyInfo keyInfo = Console.ReadKey(true);
-                    if (keyInfo.Key == ConsoleKey.D1 || keyInfo.Key == ConsoleKey.NumPad1)
+                    if (keyInfo.Key == ConsoleKey.D1 || keyInfo.Key == ConsoleKey.NumPad1 || keyInfo.Key == ConsoleKey.Enter)
                     {
                         return StartSync("stable", AppOptions.StableBranchName);
                     }
@@ -54,6 +54,7 @@ namespace UpdateClient.ConsoleUi
             Console.WriteLine("  1. Stable version (main)");
             Console.WriteLine("  2. Advanced options");
             Console.WriteLine();
+            Console.WriteLine("Press ENTER to sync stable version.");
             Console.WriteLine("Press ESC to exit immediately.");
             Console.WriteLine();
         }
