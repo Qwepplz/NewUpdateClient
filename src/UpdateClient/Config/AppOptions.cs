@@ -25,7 +25,8 @@ namespace UpdateClient.Config
         public const string PrimaryStateRootDirectoryName = "UpdateClientSync";
         public const string LegacyStateRootDirectoryName = "BetterBotSync";
 
-        public static readonly IReadOnlyList<string> CommonBranchNames = new[] { "main", "master" };
+        public const string StableBranchName = "main";
+        public const string DevelopmentBranchName = "dev";
 
         public static readonly IReadOnlyList<string> StateRootEnvironmentVariables = new[]
         {

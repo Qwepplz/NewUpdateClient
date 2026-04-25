@@ -109,7 +109,8 @@ namespace UpdateClient.App
 
             try
             {
-                if (!this.startupMenu.ShowStartupPrompt(targetDirectoryPath, AppOptions.Betterbot))
+                string selectedBranch = this.startupMenu.ShowStartupPrompt(targetDirectoryPath, AppOptions.Betterbot);
+                if (string.IsNullOrWhiteSpace(selectedBranch))
                 {
                     return this.ExitWithoutSynchronization();
                 }
@@ -120,7 +121,7 @@ namespace UpdateClient.App
 
                 RepositoryTreeResult preparedTree;
                 RepositoryRemoteKind remoteKind;
-                if (!this.TryPrepareRepositoryTree(AppOptions.Betterbot, context.TempRootDirectoryPath, out preparedTree, out remoteKind))
+                if (!this.TryPrepareRepositoryTree(AppOptions.Betterbot, selectedBranch, context.TempRootDirectoryPath, out preparedTree, out remoteKind))
                 {
                     return this.ExitWithoutSynchronization();
                 }
@@ -203,9 +204,10 @@ namespace UpdateClient.App
             }
         }
 
-        private bool TryPrepareRepositoryTree(RepositoryTarget target, string tempRootDirectoryPath, out RepositoryTreeResult treeResult, out RepositoryRemoteKind remoteKind)
+        private bool TryPrepareRepositoryTree(RepositoryTarget target, string branch, string tempRootDirectoryPath, out RepositoryTreeResult treeResult, out RepositoryRemoteKind remoteKind)
         {
             if (target == null) throw new ArgumentNullException(nameof(target));
+            if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Value cannot be empty.", nameof(branch));
             if (string.IsNullOrWhiteSpace(tempRootDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempRootDirectoryPath));
 
             treeResult = null;
@@ -213,7 +215,8 @@ namespace UpdateClient.App
 
             try
             {
-                treeResult = this.remoteRepositoryClient.PrepareRepositoryTree(target, tempRootDirectoryPath, remoteKind);
+                this.WriteLogOnlyLine(string.Format("Selected sync branch: {0}.", branch));
+                treeResult = this.remoteRepositoryClient.PrepareRepositoryTree(target, branch, tempRootDirectoryPath, remoteKind);
                 this.WriteLogOnlyLine("Selected remote source: GitHub.");
                 return true;
             }
@@ -234,7 +237,7 @@ namespace UpdateClient.App
                 }
 
                 remoteKind = RepositoryRemoteKind.Mirror;
-                treeResult = this.remoteRepositoryClient.PrepareRepositoryTree(target, tempRootDirectoryPath, remoteKind);
+                treeResult = this.remoteRepositoryClient.PrepareRepositoryTree(target, branch, tempRootDirectoryPath, remoteKind);
                 this.WriteLogOnlyLine("Selected remote source: Gitee mirror.");
                 return true;
             }

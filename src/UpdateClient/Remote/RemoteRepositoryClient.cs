@@ -13,7 +13,7 @@ namespace UpdateClient.Remote
 {
     internal interface IRemoteRepositoryClient
     {
-        RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
+        RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string branch, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
 
         string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
     }
@@ -34,11 +34,11 @@ namespace UpdateClient.Remote
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         }
 
-        public RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
+        public RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string branch, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
         {
-            ValidatePrepareRepositoryTreeArguments(target, tempDirectoryPath);
+            ValidatePrepareRepositoryTreeArguments(target, branch, tempDirectoryPath);
 
-            RepositoryTreeResult treeResult = this.GetRemoteTree(target, remoteKind);
+            RepositoryTreeResult treeResult = this.GetRemoteTree(target, new[] { branch }, remoteKind);
             this.ProbeRawAccess(target, treeResult, tempDirectoryPath, remoteKind);
             return treeResult;
         }
@@ -67,36 +67,6 @@ namespace UpdateClient.Remote
                 this.TryDeleteFile(tempPath);
                 throw new InvalidOperationException(url + " => " + exception.Message, exception);
             }
-        }
-
-        private string GetDefaultBranch(RepositoryTarget target, RepositoryRemoteKind remoteKind)
-        {
-            if (target == null) throw new ArgumentNullException(nameof(target));
-
-            try
-            {
-                RemoteJsonResponse<RepoInfo> response = this.RequestJsonFromUrl<RepoInfo>(this.urlBuilder.BuildRepositoryInfoUrl(target, remoteKind));
-                if (response.Value != null && !string.IsNullOrWhiteSpace(response.Value.default_branch))
-                {
-                    return response.Value.default_branch;
-                }
-            }
-            catch
-            {
-            }
-
-            return AppOptions.CommonBranchNames[0];
-        }
-
-        private RepositoryTreeResult GetRemoteTree(RepositoryTarget target, RepositoryRemoteKind remoteKind)
-        {
-            ValidateGetRemoteTreeArguments(target);
-
-            List<string> branchCandidates = new List<string>();
-            branchCandidates.Add(this.GetDefaultBranch(target, remoteKind));
-            branchCandidates.AddRange(AppOptions.CommonBranchNames);
-
-            return this.GetRemoteTree(target, branchCandidates, remoteKind);
         }
 
         private RepositoryTreeResult GetRemoteTree(RepositoryTarget target, IEnumerable<string> branchCandidates, RepositoryRemoteKind remoteKind)
@@ -230,9 +200,10 @@ namespace UpdateClient.Remote
             return request;
         }
 
-        private static void ValidatePrepareRepositoryTreeArguments(RepositoryTarget target, string tempDirectoryPath)
+        private static void ValidatePrepareRepositoryTreeArguments(RepositoryTarget target, string branch, string tempDirectoryPath)
         {
             if (target == null) throw new ArgumentNullException(nameof(target));
+            if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Value cannot be empty.", nameof(branch));
             if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
         }
 
