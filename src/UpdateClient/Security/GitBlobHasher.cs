@@ -17,10 +17,8 @@ namespace UpdateClient.Security
     {
         public string ComputeForFile(string path)
         {
-            // validating input.
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value cannot be empty.", nameof(path));
 
-            // hashing file content.
             FileInfo fileInfo = new FileInfo(path);
             byte[] prefixBytes = Encoding.ASCII.GetBytes("blob " + fileInfo.Length + "\0");
 
@@ -43,11 +41,9 @@ namespace UpdateClient.Security
 
         public bool MatchesRemoteBlob(string path, TreeEntry entry)
         {
-            // validating input.
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value cannot be empty.", nameof(path));
             if (entry == null) throw new ArgumentNullException(nameof(entry));
 
-            // checking file existence and size.
             if (!File.Exists(path))
             {
                 return false;
@@ -59,14 +55,12 @@ namespace UpdateClient.Security
                 return false;
             }
 
-            // comparing blob hash.
             string localSha = this.ComputeForFile(path);
             return string.Equals(localSha, entry.sha, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ToHexString(byte[] bytes)
         {
-            // formatting digest.
             StringBuilder builder = new StringBuilder(bytes.Length * 2);
             foreach (byte value in bytes)
             {
