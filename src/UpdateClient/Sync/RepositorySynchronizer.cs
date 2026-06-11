@@ -380,7 +380,8 @@ namespace UpdateClient.Sync
             return normalizedPath.StartsWith("README", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.StartsWith("LICENSE", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.StartsWith("LICENCE", StringComparison.OrdinalIgnoreCase)
-                || normalizedPath.StartsWith("LECENSE", StringComparison.OrdinalIgnoreCase);
+                || normalizedPath.StartsWith("LECENSE", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.StartsWith(".gitattributes", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string FormatProgressStatus(string stageLabel, int current, int total, string metrics)
