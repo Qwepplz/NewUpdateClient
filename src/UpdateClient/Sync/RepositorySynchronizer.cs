@@ -21,6 +21,9 @@ namespace UpdateClient.Sync
 
     internal sealed class RepositorySynchronizer : IRepositorySynchronizer
     {
+        private const string AddonsDirectoryName = "addons";
+        private const string AddonsPathPrefix = AddonsDirectoryName + "/";
+
         private readonly IRemoteRepositoryClient remoteRepositoryClient;
         private readonly ISafePathService safePathService;
         private readonly IAtomicFileWriter atomicFileWriter;
@@ -277,6 +280,8 @@ namespace UpdateClient.Sync
             List<string> oldManifest = this.ReadOldManifest(context);
 
             HashSet<string> remoteSet = new HashSet<string>(context.NewManifest, StringComparer.OrdinalIgnoreCase);
+            this.RemoveUnexpectedAddonFiles(context, remoteSet);
+
             foreach (string relativePath in oldManifest)
             {
                 if (remoteSet.Contains(relativePath))
@@ -298,6 +303,107 @@ namespace UpdateClient.Sync
                 context.Summary.Removed++;
                 WriteLogOnlyLine(context.ActiveLog, "Removed upstream-deleted file: " + relativePath);
             }
+        }
+
+        private void RemoveUnexpectedAddonFiles(SynchronizationContext context, ISet<string> remoteSet)
+        {
+            string addonsDirectoryPath = Path.Combine(context.TargetDirectoryPath, AddonsDirectoryName);
+            if (!Directory.Exists(addonsDirectoryPath))
+            {
+                return;
+            }
+
+            this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, addonsDirectoryPath);
+
+            List<string> filePaths = new List<string>();
+            List<string> directoryPaths = new List<string>();
+            CollectAddonFileSystemEntries(addonsDirectoryPath, filePaths, directoryPaths);
+
+            foreach (string filePath in SortKeys(filePaths))
+            {
+                string destinationFullPath = this.safePathService.GetFullPath(filePath);
+                if (context.ProtectedPaths.Contains(destinationFullPath) || !File.Exists(filePath))
+                {
+                    continue;
+                }
+
+                this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, filePath);
+                string relativePath = this.GetRelativePathFromTarget(context.TargetDirectoryPath, filePath);
+                if (!IsAddonPath(relativePath) || remoteSet.Contains(relativePath))
+                {
+                    continue;
+                }
+
+                File.Delete(filePath);
+                context.Summary.Removed++;
+                WriteLogOnlyLine(context.ActiveLog, "Removed unexpected addon file: " + relativePath);
+            }
+
+            this.RemoveEmptyAddonDirectories(context, addonsDirectoryPath, directoryPaths);
+        }
+
+        private static void CollectAddonFileSystemEntries(string rootDirectoryPath, List<string> filePaths, List<string> directoryPaths)
+        {
+            Stack<string> pendingDirectories = new Stack<string>();
+            pendingDirectories.Push(rootDirectoryPath);
+
+            while (pendingDirectories.Count > 0)
+            {
+                string currentDirectoryPath = pendingDirectories.Pop();
+
+                foreach (string filePath in Directory.EnumerateFiles(currentDirectoryPath))
+                {
+                    filePaths.Add(filePath);
+                }
+
+                foreach (string subDirectoryPath in Directory.EnumerateDirectories(currentDirectoryPath))
+                {
+                    if ((File.GetAttributes(subDirectoryPath) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new InvalidOperationException("Refusing to traverse a reparse point path: " + subDirectoryPath);
+                    }
+
+                    directoryPaths.Add(subDirectoryPath);
+                    pendingDirectories.Push(subDirectoryPath);
+                }
+            }
+        }
+
+        private void RemoveEmptyAddonDirectories(SynchronizationContext context, string addonsDirectoryPath, IEnumerable<string> directoryPaths)
+        {
+            foreach (string directoryPath in directoryPaths.OrderByDescending(item => item.Length))
+            {
+                this.RemoveEmptyAddonDirectoryIfEmpty(context, directoryPath);
+            }
+
+            this.RemoveEmptyAddonDirectoryIfEmpty(context, addonsDirectoryPath);
+        }
+
+        private void RemoveEmptyAddonDirectoryIfEmpty(SynchronizationContext context, string directoryPath)
+        {
+            if (!Directory.Exists(directoryPath))
+            {
+                return;
+            }
+
+            this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, directoryPath);
+            if (!Directory.EnumerateFileSystemEntries(directoryPath).Any())
+            {
+                Directory.Delete(directoryPath, false);
+            }
+        }
+
+        private string GetRelativePathFromTarget(string targetDirectoryPath, string path)
+        {
+            string targetRoot = this.safePathService.GetFullPath(targetDirectoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullPath = this.safePathService.GetFullPath(path);
+            string targetPrefix = targetRoot + Path.DirectorySeparatorChar;
+            if (!fullPath.StartsWith(targetPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Refusing to touch a path outside the target folder: " + fullPath);
+            }
+
+            return this.safePathService.NormalizeRelativePath(fullPath.Substring(targetPrefix.Length));
         }
 
         private void PersistState(SynchronizationContext context)
@@ -382,6 +488,16 @@ namespace UpdateClient.Sync
                 || normalizedPath.StartsWith("LICENCE", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.StartsWith("LECENSE", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.StartsWith(".gitattributes", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsAddonPath(string relativePath)
+        {
+            if (string.IsNullOrWhiteSpace(relativePath))
+            {
+                return false;
+            }
+
+            return relativePath.TrimStart('/').StartsWith(AddonsPathPrefix, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string FormatProgressStatus(string stageLabel, int current, int total, string metrics)
