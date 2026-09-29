@@ -15,7 +15,7 @@ namespace UpdateClient.State
     {
         string GetTargetHash(string targetDirectoryPath);
 
-        string GetStateDirectory(string targetDirectoryPath, string targetHash);
+        string GetStateDirectory(string targetDirectoryPath, string targetHash, RepositoryTarget target);
 
         string GetStateFilePath(string stateDirectoryPath);
 
@@ -52,18 +52,27 @@ namespace UpdateClient.State
             }
         }
 
-        public string GetStateDirectory(string targetDirectoryPath, string targetHash)
+        public string GetStateDirectory(string targetDirectoryPath, string targetHash, RepositoryTarget target)
         {
             if (string.IsNullOrWhiteSpace(targetDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(targetDirectoryPath));
             if (string.IsNullOrWhiteSpace(targetHash)) throw new ArgumentException("Value cannot be empty.", nameof(targetHash));
+            if (target == null) throw new ArgumentNullException(nameof(target));
 
+            bool isGet5 = string.Equals(target.StateKey, "get5", StringComparison.OrdinalIgnoreCase);
             List<string> baseCandidates = this.BuildBaseCandidates();
             foreach (string baseCandidate in baseCandidates)
             {
                 string existingStateDirectoryPath = Path.Combine(baseCandidate, targetHash);
                 if (Directory.Exists(existingStateDirectoryPath))
                 {
-                    return existingStateDirectoryPath;
+                    if (!isGet5)
+                    {
+                        return existingStateDirectoryPath;
+                    }
+
+                    string get5StatePath = Path.Combine(existingStateDirectoryPath, "get5");
+                    Directory.CreateDirectory(get5StatePath);
+                    return get5StatePath;
                 }
             }
 
@@ -75,6 +84,11 @@ namespace UpdateClient.State
                     Directory.CreateDirectory(baseCandidate);
                     string stateDirectoryPath = Path.Combine(baseCandidate, targetHash);
                     Directory.CreateDirectory(stateDirectoryPath);
+                    if (isGet5)
+                    {
+                        stateDirectoryPath = Path.Combine(stateDirectoryPath, "get5");
+                        Directory.CreateDirectory(stateDirectoryPath);
+                    }
                     return stateDirectoryPath;
                 }
                 catch (Exception exception)

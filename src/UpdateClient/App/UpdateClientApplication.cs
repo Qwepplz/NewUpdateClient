@@ -105,33 +105,35 @@ namespace UpdateClient.App
 
             RunContext context = null;
             SyncMutexHandle mutexHandle = null;
+            RepositoryTarget selectedTarget = null;
             this.TryInitializeLogging(targetDirectoryPath, args);
 
             try
             {
-                string selectedBranch = this.startupMenu.ShowStartupPrompt(targetDirectoryPath, AppOptions.Betterbot);
-                if (string.IsNullOrWhiteSpace(selectedBranch))
+                string selectedBranch;
+                if (!this.startupMenu.ShowStartupPrompt(targetDirectoryPath, out selectedTarget, out selectedBranch))
                 {
                     return this.ExitWithoutSynchronization();
                 }
 
+                this.WriteLogOnlyLine("Selected repository: " + selectedTarget.DisplayName + ".");
                 context = RunContext.Create(targetDirectoryPath, this.safePathService, this.syncStateStore);
                 mutexHandle = SyncMutexHandle.Acquire(context.TargetHash);
                 context.CreateTempRootDirectory();
 
                 RepositoryTreeResult preparedTree;
                 RepositoryRemoteKind remoteKind;
-                if (!this.TryPrepareRepositoryTree(AppOptions.Betterbot, selectedBranch, context.TempRootDirectoryPath, out preparedTree, out remoteKind))
+                if (!this.TryPrepareRepositoryTree(selectedTarget, selectedBranch, context.TempRootDirectoryPath, out preparedTree, out remoteKind))
                 {
                     return this.ExitWithoutSynchronization();
                 }
 
-                SyncSummary summary = this.SynchronizeRepository(context, preparedTree, remoteKind);
-                return this.CompleteRun(summary);
+                SyncSummary summary = this.SynchronizeRepository(context, selectedTarget, preparedTree, remoteKind);
+                return this.CompleteRun(selectedTarget, summary);
             }
             catch (Exception exception)
             {
-                return this.FailRun(exception);
+                return this.FailRun(exception, selectedTarget);
             }
             finally
             {
@@ -153,11 +155,12 @@ namespace UpdateClient.App
 
         private SyncSummary SynchronizeRepository(
             RunContext context,
+            RepositoryTarget target,
             RepositoryTreeResult preparedTree,
             RepositoryRemoteKind remoteKind)
         {
             return this.repositorySynchronizer.Synchronize(
-                AppOptions.Betterbot,
+                target,
                 preparedTree,
                 remoteKind,
                 context.TargetDirectoryPath,
@@ -166,10 +169,10 @@ namespace UpdateClient.App
                 this.activeLog);
         }
 
-        private int CompleteRun(SyncSummary summary)
+        private int CompleteRun(RepositoryTarget target, SyncSummary summary)
         {
             Console.WriteLine();
-            Console.WriteLine("Sync complete.");
+            Console.WriteLine(string.Format("Sync complete for {0}.", target.DisplayName));
             Console.WriteLine(string.Format("Added: {0}", summary.Added));
             Console.WriteLine(string.Format("Updated: {0}", summary.Updated));
             Console.WriteLine(string.Format("Removed: {0}", summary.Removed));
@@ -178,10 +181,10 @@ namespace UpdateClient.App
             return 0;
         }
 
-        private int FailRun(Exception exception)
+        private int FailRun(Exception exception, RepositoryTarget target)
         {
             Console.WriteLine();
-            Console.WriteLine("Sync failed.");
+            Console.WriteLine(target == null ? "Sync failed." : "Sync failed for " + target.DisplayName + ".");
             Console.WriteLine(exception.Message);
             this.LogException(exception);
             this.startupMenu.PauseBeforeExit();
@@ -207,16 +210,22 @@ namespace UpdateClient.App
         private bool TryPrepareRepositoryTree(RepositoryTarget target, string branch, string tempRootDirectoryPath, out RepositoryTreeResult treeResult, out RepositoryRemoteKind remoteKind)
         {
             if (target == null) throw new ArgumentNullException(nameof(target));
-            if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("Value cannot be empty.", nameof(branch));
+            if (branch == null && !ReferenceEquals(target, AppOptions.Get5))
+                throw new ArgumentException("Default branch lookup is only available for Get5.", nameof(branch));
+            if (branch != null && string.IsNullOrWhiteSpace(branch))
+                throw new ArgumentException("Value cannot be empty.", nameof(branch));
             if (string.IsNullOrWhiteSpace(tempRootDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempRootDirectoryPath));
 
             treeResult = null;
             remoteKind = RepositoryRemoteKind.Github;
+            this.WriteLogOnlyLine("Selected sync branch: " + (branch ?? "repository default") + ".");
 
             try
             {
-                this.WriteLogOnlyLine(string.Format("Selected sync branch: {0}.", branch));
-                treeResult = this.remoteRepositoryClient.PrepareRepositoryTree(target, branch, tempRootDirectoryPath, remoteKind);
+                treeResult = branch == null
+                    ? this.remoteRepositoryClient.PrepareRepositoryTree(target, tempRootDirectoryPath, remoteKind)
+                    : this.remoteRepositoryClient.PrepareRepositoryTree(target, branch, tempRootDirectoryPath, remoteKind);
+                this.WriteLogOnlyLine("Resolved sync branch: " + treeResult.Branch + ".");
                 this.WriteLogOnlyLine("Selected remote source: GitHub.");
                 return true;
             }
@@ -237,7 +246,10 @@ namespace UpdateClient.App
                 }
 
                 remoteKind = RepositoryRemoteKind.Mirror;
-                treeResult = this.remoteRepositoryClient.PrepareRepositoryTree(target, branch, tempRootDirectoryPath, remoteKind);
+                treeResult = branch == null
+                    ? this.remoteRepositoryClient.PrepareRepositoryTree(target, tempRootDirectoryPath, remoteKind)
+                    : this.remoteRepositoryClient.PrepareRepositoryTree(target, branch, tempRootDirectoryPath, remoteKind);
+                this.WriteLogOnlyLine("Resolved sync branch: " + treeResult.Branch + ".");
                 this.WriteLogOnlyLine("Selected remote source: Gitee mirror.");
                 return true;
             }

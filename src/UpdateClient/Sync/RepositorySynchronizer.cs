@@ -21,9 +21,6 @@ namespace UpdateClient.Sync
 
     internal sealed class RepositorySynchronizer : IRepositorySynchronizer
     {
-        private const string AddonsDirectoryName = "addons";
-        private const string AddonsPathPrefix = AddonsDirectoryName + "/";
-
         private readonly IRemoteRepositoryClient remoteRepositoryClient;
         private readonly ISafePathService safePathService;
         private readonly IAtomicFileWriter atomicFileWriter;
@@ -47,7 +44,6 @@ namespace UpdateClient.Sync
             internal Dictionary<string, CachedFileState> CachedFiles { get; set; }
             internal Dictionary<string, CachedFileState> NewCachedFiles { get; set; }
             internal Dictionary<string, TreeEntry> RemoteFiles { get; set; }
-            internal Dictionary<string, TreeEntry> ExcludedFiles { get; set; }
             internal List<string> NewManifest { get; set; }
             internal TextWriter ProgressWriter { get; set; }
 
@@ -86,7 +82,7 @@ namespace UpdateClient.Sync
             this.ClassifyRemoteEntries(context);
             this.RemoveExcludedRootFilesWhenSafe(context);
             this.DownloadAndUpdateFiles(context);
-            this.RemoveUpstreamDeletedFiles(context);
+            this.RemoveUnexpectedStrictFiles(context);
             this.PersistState(context);
 
             return context.Summary;
@@ -122,7 +118,7 @@ namespace UpdateClient.Sync
                 Console.WriteLine(string.Format("Cleaned leftover temp files: {0}", context.Summary.StaleArtifactsRemoved));
             }
 
-            context.StateDirectoryPath = this.syncStateStore.GetStateDirectory(context.TargetDirectoryPath, context.TargetHash);
+            context.StateDirectoryPath = this.syncStateStore.GetStateDirectory(context.TargetDirectoryPath, context.TargetHash, context.Target);
             context.ManifestPath = this.syncStateStore.GetLegacyManifestPath(context.StateDirectoryPath);
         }
 
@@ -146,7 +142,6 @@ namespace UpdateClient.Sync
             context.CachedFiles = context.ImportedState.Files;
             context.NewCachedFiles = new Dictionary<string, CachedFileState>(StringComparer.OrdinalIgnoreCase);
             context.RemoteFiles = new Dictionary<string, TreeEntry>(StringComparer.OrdinalIgnoreCase);
-            context.ExcludedFiles = new Dictionary<string, TreeEntry>(StringComparer.OrdinalIgnoreCase);
 
             foreach (TreeEntry entry in context.TreeResult.Tree)
             {
@@ -156,11 +151,7 @@ namespace UpdateClient.Sync
                 }
 
                 string relativePath = this.safePathService.NormalizeRelativePath(entry.path);
-                if (IsExcludedRootFile(relativePath))
-                {
-                    context.ExcludedFiles[relativePath] = entry;
-                }
-                else
+                if (!SyncPolicy.IsExcludedRootFile(relativePath))
                 {
                     context.RemoteFiles[relativePath] = entry;
                 }
@@ -169,36 +160,24 @@ namespace UpdateClient.Sync
 
         private void RemoveExcludedRootFilesWhenSafe(SynchronizationContext context)
         {
-            Console.WriteLine("[2/4] Removing repo README/LICENSE when safe...");
-            foreach (string relativePath in SortKeys(context.ExcludedFiles.Keys))
+            Console.WriteLine("[2/4] Removing excluded root files...");
+            foreach (string filePath in Directory.EnumerateFiles(context.TargetDirectoryPath))
             {
-                TreeEntry entry = context.ExcludedFiles[relativePath];
-                string destinationPath = this.safePathService.GetTargetPathFromRelative(context.TargetDirectoryPath, relativePath);
-                string destinationFullPath = this.safePathService.GetFullPath(destinationPath);
-
-                if (context.ProtectedPaths.Contains(destinationFullPath) || !File.Exists(destinationPath))
+                string relativePath = Path.GetFileName(filePath);
+                if (!SyncPolicy.IsExcludedRootFile(relativePath))
                 {
                     continue;
                 }
 
-                this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, destinationPath);
-
-                bool matchesRemote = this.syncStateStore.MatchesCachedRemote(relativePath, destinationPath, entry, context.CachedFiles);
-                if (!matchesRemote)
+                string fullPath = this.safePathService.GetFullPath(filePath);
+                if (context.ProtectedPaths.Contains(fullPath))
                 {
-                    matchesRemote = this.gitBlobHasher.MatchesRemoteBlob(destinationPath, entry);
+                    continue;
                 }
 
-                if (matchesRemote)
-                {
-                    File.Delete(destinationPath);
-                    this.safePathService.RemoveEmptyParentDirectories(destinationPath, context.TargetDirectoryPath);
-                    WriteLogOnlyLine(context.ActiveLog, "Removed README/LICENSE file: " + relativePath);
-                }
-                else
-                {
-                    WriteLogOnlyLine(context.ActiveLog, "Kept local README/LICENSE file: " + relativePath);
-                }
+                this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, filePath);
+                File.Delete(filePath);
+                WriteLogOnlyLine(context.ActiveLog, "Removed excluded root file: " + relativePath);
             }
         }
 
@@ -274,50 +253,38 @@ namespace UpdateClient.Sync
             }
         }
 
-        private void RemoveUpstreamDeletedFiles(SynchronizationContext context)
+        private void RemoveUnexpectedStrictFiles(SynchronizationContext context)
         {
-            Console.WriteLine("[4/4] Removing files deleted upstream...");
-            List<string> oldManifest = this.ReadOldManifest(context);
-
-            HashSet<string> remoteSet = new HashSet<string>(context.NewManifest, StringComparer.OrdinalIgnoreCase);
-            this.RemoveUnexpectedAddonFiles(context, remoteSet);
-
-            foreach (string relativePath in oldManifest)
-            {
-                if (remoteSet.Contains(relativePath))
-                {
-                    continue;
-                }
-
-                string destinationPath = this.safePathService.GetTargetPathFromRelative(context.TargetDirectoryPath, relativePath);
-                string destinationFullPath = this.safePathService.GetFullPath(destinationPath);
-
-                if (context.ProtectedPaths.Contains(destinationFullPath) || !File.Exists(destinationPath))
-                {
-                    continue;
-                }
-
-                this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, destinationPath);
-                File.Delete(destinationPath);
-                this.safePathService.RemoveEmptyParentDirectories(destinationPath, context.TargetDirectoryPath);
-                context.Summary.Removed++;
-                WriteLogOnlyLine(context.ActiveLog, "Removed upstream-deleted file: " + relativePath);
-            }
-        }
-
-        private void RemoveUnexpectedAddonFiles(SynchronizationContext context, ISet<string> remoteSet)
-        {
-            string addonsDirectoryPath = Path.Combine(context.TargetDirectoryPath, AddonsDirectoryName);
-            if (!Directory.Exists(addonsDirectoryPath))
+            if (context.Target.StrictDirectories.Count == 0)
             {
                 return;
             }
 
-            this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, addonsDirectoryPath);
+            Console.WriteLine("[4/4] Removing unexpected files from strict directories...");
+            HashSet<string> remoteSet = new HashSet<string>(context.NewManifest, StringComparer.OrdinalIgnoreCase);
+            foreach (string strictDirectory in context.Target.StrictDirectories)
+            {
+                this.RemoveUnexpectedFilesInDirectory(context, strictDirectory, remoteSet);
+            }
+        }
+
+        private void RemoveUnexpectedFilesInDirectory(SynchronizationContext context, string strictDirectory, ISet<string> remoteSet)
+        {
+            string normalizedDirectory = this.safePathService.NormalizeRelativePath(strictDirectory).Trim('/');
+            string directoryPath = this.safePathService.GetTargetPathFromRelative(context.TargetDirectoryPath, normalizedDirectory);
+            this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, directoryPath);
+            if (File.Exists(directoryPath))
+            {
+                throw new InvalidOperationException("Strict directory path is a file: " + directoryPath);
+            }
+            if (!Directory.Exists(directoryPath))
+            {
+                return;
+            }
 
             List<string> filePaths = new List<string>();
             List<string> directoryPaths = new List<string>();
-            CollectAddonFileSystemEntries(addonsDirectoryPath, filePaths, directoryPaths);
+            CollectStrictFileSystemEntries(directoryPath, filePaths, directoryPaths);
 
             foreach (string filePath in SortKeys(filePaths))
             {
@@ -329,20 +296,20 @@ namespace UpdateClient.Sync
 
                 this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, filePath);
                 string relativePath = this.GetRelativePathFromTarget(context.TargetDirectoryPath, filePath);
-                if (!IsAddonPath(relativePath) || remoteSet.Contains(relativePath))
+                if (!IsWithinStrictDirectory(relativePath, normalizedDirectory) || remoteSet.Contains(relativePath))
                 {
                     continue;
                 }
 
                 File.Delete(filePath);
                 context.Summary.Removed++;
-                WriteLogOnlyLine(context.ActiveLog, "Removed unexpected addon file: " + relativePath);
+                WriteLogOnlyLine(context.ActiveLog, "Removed unexpected strict file: " + relativePath);
             }
 
-            this.RemoveEmptyAddonDirectories(context, addonsDirectoryPath, directoryPaths);
+            this.RemoveEmptyStrictDirectories(context, directoryPath, directoryPaths);
         }
 
-        private static void CollectAddonFileSystemEntries(string rootDirectoryPath, List<string> filePaths, List<string> directoryPaths)
+        private static void CollectStrictFileSystemEntries(string rootDirectoryPath, List<string> filePaths, List<string> directoryPaths)
         {
             Stack<string> pendingDirectories = new Stack<string>();
             pendingDirectories.Push(rootDirectoryPath);
@@ -369,17 +336,17 @@ namespace UpdateClient.Sync
             }
         }
 
-        private void RemoveEmptyAddonDirectories(SynchronizationContext context, string addonsDirectoryPath, IEnumerable<string> directoryPaths)
+        private void RemoveEmptyStrictDirectories(SynchronizationContext context, string strictDirectoryPath, IEnumerable<string> directoryPaths)
         {
             foreach (string directoryPath in directoryPaths.OrderByDescending(item => item.Length))
             {
-                this.RemoveEmptyAddonDirectoryIfEmpty(context, directoryPath);
+                this.RemoveEmptyStrictDirectoryIfEmpty(context, directoryPath);
             }
 
-            this.RemoveEmptyAddonDirectoryIfEmpty(context, addonsDirectoryPath);
+            this.RemoveEmptyStrictDirectoryIfEmpty(context, strictDirectoryPath);
         }
 
-        private void RemoveEmptyAddonDirectoryIfEmpty(SynchronizationContext context, string directoryPath)
+        private void RemoveEmptyStrictDirectoryIfEmpty(SynchronizationContext context, string directoryPath)
         {
             if (!Directory.Exists(directoryPath))
             {
@@ -411,20 +378,6 @@ namespace UpdateClient.Sync
             List<string> sortedManifest = context.NewManifest.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList();
             File.WriteAllLines(context.ManifestPath, sortedManifest.ToArray(), new UTF8Encoding(false));
             this.syncStateStore.Export(context.StateDirectoryPath, sortedManifest, context.NewCachedFiles);
-        }
-
-        private List<string> ReadOldManifest(SynchronizationContext context)
-        {
-            List<string> oldManifest = new List<string>(context.ImportedState.TrackedFiles);
-            if (oldManifest.Count == 0 && File.Exists(context.ManifestPath))
-            {
-                oldManifest = File.ReadAllLines(context.ManifestPath)
-                    .Where(item => !string.IsNullOrWhiteSpace(item))
-                    .Select(this.safePathService.NormalizeRelativePath)
-                    .ToList();
-            }
-
-            return oldManifest;
         }
 
         private void DownloadRemoteFile(RepositoryTarget target, string branch, TreeEntry entry, string tempRootDirectoryPath, string destinationPath, RepositoryRemoteKind remoteKind)
@@ -470,34 +423,14 @@ namespace UpdateClient.Sync
             return keys.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
-        private static bool IsExcludedRootFile(string relativePath)
+        private static bool IsWithinStrictDirectory(string relativePath, string strictDirectory)
         {
-            if (string.IsNullOrWhiteSpace(relativePath))
+            if (string.IsNullOrWhiteSpace(relativePath) || string.IsNullOrWhiteSpace(strictDirectory))
             {
                 return false;
             }
 
-            string normalizedPath = relativePath.Trim('/');
-            if (normalizedPath.IndexOf('/') >= 0)
-            {
-                return false;
-            }
-
-            return normalizedPath.StartsWith("README", StringComparison.OrdinalIgnoreCase)
-                || normalizedPath.StartsWith("LICENSE", StringComparison.OrdinalIgnoreCase)
-                || normalizedPath.StartsWith("LICENCE", StringComparison.OrdinalIgnoreCase)
-                || normalizedPath.StartsWith("LECENSE", StringComparison.OrdinalIgnoreCase)
-                || normalizedPath.StartsWith(".gitattributes", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsAddonPath(string relativePath)
-        {
-            if (string.IsNullOrWhiteSpace(relativePath))
-            {
-                return false;
-            }
-
-            return relativePath.TrimStart('/').StartsWith(AddonsPathPrefix, StringComparison.OrdinalIgnoreCase);
+            return relativePath.StartsWith(strictDirectory.Trim('/') + "/", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string FormatProgressStatus(string stageLabel, int current, int total, string metrics)

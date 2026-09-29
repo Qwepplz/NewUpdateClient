@@ -1,62 +1,112 @@
 using System;
+using System.Reflection;
 using UpdateClient.Config;
 
 namespace UpdateClient.ConsoleUi
 {
     internal sealed class StartupMenu
     {
-        public string ShowStartupPrompt(string targetDirectoryPath, RepositoryTarget target)
+        public bool ShowStartupPrompt(string targetDirectoryPath, out RepositoryTarget target, out string branch)
         {
             if (string.IsNullOrWhiteSpace(targetDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(targetDirectoryPath));
-            if (target == null) throw new ArgumentNullException(nameof(target));
 
+            target = null;
+            branch = null;
             try
             {
                 while (true)
                 {
-                    this.ShowMainMenu(targetDirectoryPath);
+                    this.ShowRepositoryMenu(targetDirectoryPath);
                     ConsoleKeyInfo keyInfo = Console.ReadKey(true);
                     if (keyInfo.Key == ConsoleKey.D1 || keyInfo.Key == ConsoleKey.NumPad1 || keyInfo.Key == ConsoleKey.Enter)
                     {
-                        return StartSync("stable", AppOptions.StableBranchName);
-                    }
-
-                    if (keyInfo.Key == ConsoleKey.D2 || keyInfo.Key == ConsoleKey.NumPad2)
-                    {
-                        string advancedBranch = this.ShowAdvancedMenu();
-                        if (!string.IsNullOrWhiteSpace(advancedBranch))
+                        string selectedBranch = this.ShowBetterbotBranchMenu();
+                        if (selectedBranch != null)
                         {
-                            return advancedBranch;
+                            target = AppOptions.Betterbot;
+                            branch = selectedBranch;
+                            return true;
                         }
                     }
-
-                    if (keyInfo.Key == ConsoleKey.Escape)
+                    else if (keyInfo.Key == ConsoleKey.D2 || keyInfo.Key == ConsoleKey.NumPad2)
+                    {
+                        target = AppOptions.Get5;
+                        Console.WriteLine("Starting Get5 sync.");
+                        Console.WriteLine();
+                        return true;
+                    }
+                    else if (keyInfo.Key == ConsoleKey.Escape)
                     {
                         Console.WriteLine("Exited by user.");
-                        return null;
+                        return false;
                     }
                 }
             }
             catch
             {
-                return StartSync("stable", AppOptions.StableBranchName);
+                target = AppOptions.Betterbot;
+                branch = StartSync("Betterbot stable", AppOptions.StableBranchName);
+                return true;
             }
         }
 
-        private void ShowMainMenu(string targetDirectoryPath)
+        private void ShowRepositoryMenu(string targetDirectoryPath)
         {
-            Console.WriteLine("UpdateClient updater");
+            AssemblyInformationalVersionAttribute versionAttribute =
+                typeof(StartupMenu).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>();
+            string version = versionAttribute == null
+                ? typeof(StartupMenu).Assembly.GetName().Version.ToString(3)
+                : versionAttribute.InformationalVersion;
+
+            Console.WriteLine("UpdateClient updater v" + version);
             Console.WriteLine();
             Console.WriteLine("Target folder:");
             Console.WriteLine(targetDirectoryPath);
             Console.WriteLine();
-            Console.WriteLine("Select sync channel:");
-            Console.WriteLine("  1. Stable version (main)");
-            Console.WriteLine("  2. Advanced options");
+            Console.WriteLine("Select repository:");
+            Console.WriteLine("  1. Betterbot");
+            Console.WriteLine("  2. Get5");
             Console.WriteLine();
-            Console.WriteLine("Press ENTER to sync stable version.");
+            Console.WriteLine("Press ENTER to select Betterbot.");
             Console.WriteLine("Press ESC to exit immediately.");
             Console.WriteLine();
+        }
+
+        private string ShowBetterbotBranchMenu()
+        {
+            while (true)
+            {
+                Console.WriteLine("Betterbot sync channel");
+                Console.WriteLine();
+                Console.WriteLine("  1. Stable version (main)");
+                Console.WriteLine("  2. Advanced options");
+                Console.WriteLine();
+                Console.WriteLine("Press ENTER to sync stable version.");
+                Console.WriteLine("Press ESC to return to repository selection.");
+                Console.WriteLine();
+
+                ConsoleKeyInfo keyInfo = Console.ReadKey(true);
+                if (keyInfo.Key == ConsoleKey.D1 || keyInfo.Key == ConsoleKey.NumPad1 || keyInfo.Key == ConsoleKey.Enter)
+                {
+                    return StartSync("Betterbot stable", AppOptions.StableBranchName);
+                }
+
+                if (keyInfo.Key == ConsoleKey.D2 || keyInfo.Key == ConsoleKey.NumPad2)
+                {
+                    string advancedBranch = this.ShowAdvancedMenu();
+                    if (advancedBranch != null)
+                    {
+                        return advancedBranch;
+                    }
+                }
+
+                if (keyInfo.Key == ConsoleKey.Escape)
+                {
+                    Console.WriteLine("Returning to repository selection...");
+                    Console.WriteLine();
+                    return null;
+                }
+            }
         }
 
         private string ShowAdvancedMenu()
@@ -66,7 +116,7 @@ namespace UpdateClient.ConsoleUi
             Console.WriteLine("Select sync channel:");
             Console.WriteLine("  1. Development version (dev)");
             Console.WriteLine();
-            Console.WriteLine("Press ESC to return to the main menu.");
+            Console.WriteLine("Press ESC to return to the Betterbot menu.");
             Console.WriteLine();
 
             while (true)
@@ -74,12 +124,12 @@ namespace UpdateClient.ConsoleUi
                 ConsoleKeyInfo keyInfo = Console.ReadKey(true);
                 if (keyInfo.Key == ConsoleKey.D1 || keyInfo.Key == ConsoleKey.NumPad1)
                 {
-                    return StartSync("development", AppOptions.DevelopmentBranchName);
+                    return StartSync("Betterbot development", AppOptions.DevelopmentBranchName);
                 }
 
                 if (keyInfo.Key == ConsoleKey.Escape)
                 {
-                    Console.WriteLine("Returning to main menu...");
+                    Console.WriteLine("Returning to Betterbot menu...");
                     Console.WriteLine();
                     return null;
                 }
@@ -107,7 +157,7 @@ namespace UpdateClient.ConsoleUi
             Console.WriteLine();
             Console.WriteLine(string.Format("You can continue with the Gitee mirror for {0}.", target.DisplayName));
             Console.WriteLine("Risk: the mirror may lag behind GitHub.");
-            Console.WriteLine("Continuing may sync an older version, miss newer files, or remove files that only exist in newer GitHub versions.");
+            Console.WriteLine("Continuing may sync an older version or miss newer files.");
             Console.WriteLine();
             Console.Write("Type YES to continue with the mirror, or press ENTER to cancel: ");
             try

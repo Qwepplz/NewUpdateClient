@@ -8,12 +8,15 @@ using System.Web.Script.Serialization;
 using UpdateClient.Config;
 using UpdateClient.Remote.Models;
 using UpdateClient.Security;
+using UpdateClient.Sync;
 
 namespace UpdateClient.Remote
 {
     internal interface IRemoteRepositoryClient
     {
         RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string branch, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
+
+        RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
 
         string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
     }
@@ -43,6 +46,17 @@ namespace UpdateClient.Remote
             return treeResult;
         }
 
+        public RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
+        {
+            ValidateGetRemoteTreeArguments(target);
+            if (string.IsNullOrWhiteSpace(tempDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(tempDirectoryPath));
+
+            string defaultBranch = this.GetDefaultBranch(target, remoteKind);
+            RepositoryTreeResult treeResult = this.GetRemoteTree(target, new[] { defaultBranch, "main", "master" }, remoteKind);
+            this.ProbeRawAccess(target, treeResult, tempDirectoryPath, remoteKind);
+            return treeResult;
+        }
+
         public string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
         {
             ValidateDownloadArguments(target, branch, entry, tempDirectoryPath);
@@ -67,6 +81,26 @@ namespace UpdateClient.Remote
                 this.TryDeleteFile(tempPath);
                 throw new InvalidOperationException(url + " => " + exception.Message, exception);
             }
+        }
+
+        private string GetDefaultBranch(RepositoryTarget target, RepositoryRemoteKind remoteKind)
+        {
+            ValidateGetRemoteTreeArguments(target);
+
+            try
+            {
+                RemoteJsonResponse<RepoInfo> response = this.RequestJsonFromUrl<RepoInfo>(this.urlBuilder.BuildRepositoryInfoUrl(target, remoteKind));
+                if (response.Value != null && !string.IsNullOrWhiteSpace(response.Value.default_branch))
+                {
+                    return response.Value.default_branch;
+                }
+            }
+            catch
+            {
+                Console.WriteLine("       Default branch lookup failed, trying common branch names.");
+            }
+
+            return "main";
         }
 
         private RepositoryTreeResult GetRemoteTree(RepositoryTarget target, IEnumerable<string> branchCandidates, RepositoryRemoteKind remoteKind)
@@ -123,7 +157,8 @@ namespace UpdateClient.Remote
                 .Where(item =>
                     item != null
                     && string.Equals(item.type, "blob", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrWhiteSpace(item.path))
+                    && !string.IsNullOrWhiteSpace(item.path)
+                    && !SyncPolicy.IsExcludedRootFile(item.path))
                 .OrderBy(item => item.size)
                 .FirstOrDefault();
 

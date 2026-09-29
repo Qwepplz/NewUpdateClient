@@ -65,6 +65,11 @@ namespace UpdateClient.Config
         };
 
         public static readonly RepositoryTarget Betterbot =
-            new RepositoryTarget("Betterbot", "betterbot", "Qwepplz", "Betterbot", "SaUrrr", "Betterbot");
+            new RepositoryTarget("Betterbot", "betterbot", "Qwepplz", "Betterbot", null, null,
+                new[] { "addons", "cfg/sourcemod" });
+
+        public static readonly RepositoryTarget Get5 =
+            new RepositoryTarget("Get5", "get5", "Qwepplz", "get5", "SaUrrr", "get5",
+                new string[0]);
     }
 }
