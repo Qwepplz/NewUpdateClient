@@ -1,39 +1,93 @@
 # UpdateClient
 
-UpdateClient is a repository sync updater for Windows directories. Its purpose is to safely synchronize the contents of a predefined remote repository into the directory where the program is running, while preserving local sync state and runtime logs so that repeated execution, interrupted updates, and troubleshooting remain traceable.
+UpdateClient is a .NET 10 console updater for Windows and Linux. It synchronizes a predefined repository into the directory containing the program, keeps local sync state and logs, and exits after one run. The shell's working directory does not select the target.
 
-This README is intended to be the long-term project description. It focuses only on the stable identity, behavior, architectural boundaries, and runtime conventions of the project, and does not record version history, recent changes, temporary maintenance notes, or phase-specific development plans.
+## Platforms and Deployment
 
-## Project Positioning
+Each platform has a separate x64 self-contained single file. Users do not need to install .NET.
 
-UpdateClient is a Windows console application built on `.NET Framework 4.8`. It is neither a general-purpose package manager nor a resident background service. Instead, it is a single-run directory synchronization tool: the user confirms the target directory, the program performs one full synchronization from a remote repository into that directory, and then exits after reporting the result.
+| Platform | Scope |
+| --- | --- |
+| Windows 11 x64 | Published executable and applicable automated, menu and filesystem checks verified |
+| Ubuntu 26.04 LTS x64 | Published executable runs directly; applicable automated, SSH TTY, permissions, links and cross-session mutex checks verified |
+| Windows 10 Home / Pro 22H2 x64 | Compatibility target, not tested; these editions are not listed in the official .NET 10 supported OS matrix |
+| Windows Server 2019 / 2022 / 2025 x64 | Compatibility targets in the .NET 10 matrix, not tested |
 
-The core object of the project is the directory in which the program is located. In practice, this means UpdateClient is expected to run inside the directory that is being updated. The target directory is therefore the managed object itself rather than a separate data directory created or controlled by the program. During synchronization, the program decides which files should be added, updated, kept, or removed by comparing the remote repository tree, the local file state, and the recorded synchronization history.
+See the [.NET 10 supported OS matrix](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md). Windows 11 results do not establish Windows 10 or Server compatibility. Other distributions and architectures are outside the current scope.
 
-## How It Works
+Choose the artifact for the destination platform and place it in the directory to update:
 
-When the program starts, it displays the target directory and the configured sync target, then waits for user confirmation. After confirmation, UpdateClient resolves the remote repository's default branch, retrieves the full repository tree, and loads the existing local synchronization state to build a comparison view. For files that exist upstream, the program first checks whether local files already match by using cached state and Git blob hashes; only files that truly require changes are downloaded and written into the target directory.
+- Windows: `UpdateClient.exe`.
+- Linux: `UpdateClient`. Give the file user execute permission and run it from a terminal:
 
-Once synchronization is complete, the program summarizes how many files were added, updated, removed, or left unchanged, and then exports the new sync state. Files that were previously managed by the tool but have been deleted upstream are removed from the target directory when it is safe to do so. The entire process is bounded as a single execution cycle: confirm before starting, show progress while running, print a summary at the end, and then exit.
+```bash
+chmod u+x ./UpdateClient
+./UpdateClient
+```
 
-Remote access follows an ordered primary-source and mirror fallback strategy. This strategy improves the chances of successfully retrieving repository metadata and file contents, but it does not change the nature of the project: UpdateClient remains a tool for synchronizing predefined repository content into a local directory, not a general-purpose mirror management platform.
+Self-contained deployment includes the .NET runtime, but the operating system still needs its native libraries and certificate store. For Ubuntu 26.04, see Microsoft's [dependency list](https://learn.microsoft.com/en-us/dotnet/core/install/linux-ubuntu-install#dependencies). The single file may extract bundled native libraries to the runtime's private cache. On Linux this normally uses `$HOME/.net`; `DOTNET_BUNDLE_EXTRACT_BASE_DIR` can select another user-owned private cache directory.
 
-## Safety and State
+Synchronization does not establish that upstream SourceMod plugins or other binaries can load on Linux. Plugin portability and game-server installation are separate concerns.
 
-Before writing any file, UpdateClient validates paths to ensure synchronized content cannot escape the target directory boundary. It also checks for directory conflicts and uses temporary directories while preparing downloads and replacements. The program establishes a mutex for each target directory so that multiple synchronization processes do not modify the same file set at the same time.
+## Menu and Sources
 
-Because the updater usually lives inside the directory that it updates, UpdateClient protects its own helper scripts, source-style filenames, and executable filenames from being overwritten during synchronization. Temporary artifacts left behind by previous runs are detected and cleaned up when possible, which helps reduce residue after abnormal termination.
+The first menu selects Betterbot or Get5. Enter selects Betterbot. Its branch menu defaults to stable `main`; Advanced offers `dev`. Esc returns from Advanced to the branch menu, from the branch menu to repository selection, or exits from repository selection.
 
-Runtime logs are stored in the `log/` directory under the target folder by default. Synchronization state is stored in `sync-state.json`, with compatibility for the older `tracked-files.txt` manifest format. The state root can be overridden through the `UPDATECLIENT_SYNC_STATE` or `BETTERBOT_SYNC_STATE` environment variables; if no override is provided, the program chooses an available state location under local application data, roaming application data, or the system temporary directory.
+Betterbot uses GitHub `Qwepplz/Betterbot` and only the selected branch. Get5 uses GitHub `Qwepplz/get5`, trying the repository's default branch, then `main` and `master` without duplicate attempts. If Get5 preparation fails, the user may type `YES` to accept the Gitee `SaUrrr/get5` mirror. The mirror is queried independently and may lag behind GitHub. The source stays fixed during synchronization.
 
-## Project Structure
+The product retains its interactive menu and has no unattended command interface. Unavailable console input keeps the existing Betterbot/main default behavior. Redirected input or output does not wait for an additional exit key.
 
-The source code is located under `src/UpdateClient`. Within that tree, `App` is responsible for application startup, flow orchestration, exception handling, and log lifecycle management; `Config` defines constants, repository targets, and runtime conventions; `ConsoleUi` handles startup prompts, pause behavior, and progress display; `Remote` encapsulates remote repository metadata, tree retrieval, and file download access; `State` manages sync state import, export, cache matching, and legacy format compatibility; and `Sync` contains the core synchronization workflow, mutex control, and result aggregation.
+## Synchronization Policy
 
-File-system, security, and logging concerns are separated into dedicated areas. `FileSystem` handles safe paths, directory-conflict checks, and atomic writes; `Security` provides Git blob hashing and content matching; and `Logging` manages session logs, file writers, and shared console output behavior. This structure keeps synchronization flow, remote access, local state, and infrastructure concerns clearly separated.
+Remote files are checked against cached size, write time and SHA metadata, or verified using Git blob SHA-1. Files that need changes are downloaded and SHA-checked before replacement.
 
-## Build and License
+Ordinary directories only receive additions and updates. Upstream deletion, movement or renaming does not delete old local files there. Betterbot strictly synchronizes `addons/` and `cfg/sourcemod/`, removing unexpected files after all downloads succeed. Get5 preserves extra local files throughout the target.
 
-The solution entry point is `UpdateClient.sln`, the main project file is `src/UpdateClient/UpdateClient.csproj`, and directory-level build properties are defined in `Directory.Build.props`. The local development build script entry point is `tools/Build-UpdateClient.bat`.
+Root files named `LICENSE`, `README` or `.gitattributes`, including nonempty extension variants such as `README.md`, are excluded case-insensitively and local matching root files are removed when safe. Subdirectory files and names such as `README-old.md` do not match this rule. Matching directories are not recursively deleted.
 
-The license text for this repository is provided in `LICENSE`. Any use or distribution of the project should follow the terms defined in that file.
+A complete empty tree is valid. Missing, truncated, conflicting or unsafe repository trees are rejected before probing or synchronization cleanup. Remote symbolic-link blobs and unknown blob modes are refused; regular `100644` and `100755` blobs can supply content.
+
+## Safety, State and Logs
+
+Windows filesystem paths compare without case; Linux paths compare with case. The updater checks target boundaries, link/reparse-point ancestors and file/directory conflicts. It protects its actual host executable, including after renaming, and known updater helper filenames. Filesystem roots cannot be normal synchronization targets.
+
+Replacements stage a file beside the destination and use atomic replace/move operations. Linux replacements preserve the Unix mode of an existing ordinary file. New files use normal download-file permissions; Git execution bits are not separately applied. Atomicity covers one file. Failed runs can retain files already updated; there is no whole-run transaction or rollback.
+
+A named global mutex prevents concurrent runs for the same target across sessions. Different targets can run concurrently. Older .NET Framework clients use a different lock namespace, so avoid running an old and new client against the same target.
+
+State uses the existing `sync-state.json` version and fields, with compatibility for `tracked-files.txt`. Legacy manifests do not drive ordinary-file deletion. Betterbot stores state under the target hash; Get5 uses its `get5/` subdirectory.
+
+State candidates begin with `UPDATECLIENT_SYNC_STATE` and `BETTERBOT_SYNC_STATE`, in that order. Use absolute paths for explicit roots.
+
+- Windows reuses existing target state before creating a new directory. It retains the `UpdateClientSync` and `BetterBotSync` roots under local application data, roaming application data or temporary storage, plus the existing target-hash algorithm.
+- Linux uses candidates in order: explicit roots, an absolute `XDG_STATE_HOME/UpdateClientSync`, `$HOME/.local/state/UpdateClientSync`, then temporary `UpdateClientSync`. Relative XDG paths are ignored. Existing temporary state does not take priority over an available persistent candidate.
+
+Logs append to `log/UpdateClient-yyyy-MM-dd.log` under the target. Older daily logs are archived as individual `.7z` files using the included managed implementation. Archive failure retains the source log. No external 7-Zip program is needed by the product.
+
+## Build and Verification
+
+Install a .NET 10 SDK. The solution is `UpdateClient.sln`; the product project is `src/UpdateClient/UpdateClient.csproj`. On Windows:
+
+```powershell
+./tools/Build-UpdateClient.bat --no-pause
+```
+
+The script publishes both `win-x64` and `linux-x64`; either failure returns a nonzero exit code. Final artifacts are `local/dist/UpdateClient.exe` and `local/dist/linux-x64/UpdateClient`. Intermediate builds and publications stay under `local/`.
+
+To publish on a host with the SDK directly:
+
+```bash
+dotnet publish src/UpdateClient/UpdateClient.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=embedded -p:PublishTrimmed=false -p:PublishAot=false -o local/publish/UpdateClient/linux-x64
+```
+
+Use `win-x64` and a corresponding output directory for Windows. The deployment artifact needs no external DLL, deps, runtimeconfig or PDB files. Trimming and AOT are disabled.
+
+The existing console verification project is `tests/UpdateClient.SyncTests`. It links production code and stays outside product packaging. Its automatic groups are `policy`, `state`, `remote`, `sync`, `app`, `logging`, `platform`, `mutex` and `all`. `menu` checks interactive selection; `self-protect` requires a published single-file test host.
+
+Linux archive-content validation uses `UPDATECLIENT_TEST_7ZZ` to point at an independent official 7zz executable. This is a test tool, and absence or extraction failure fails that validation. Tests use isolated targets; never perform a normal sync in the source checkout or publication directory. Real repository synchronization also depends on upstream API quotas and file availability; offline fixture checks do not establish live network success.
+
+## Structure and License
+
+Product source is under `src/UpdateClient/`: `App` orchestrates a run; `ConsoleUi` handles menus and progress; `Remote` retrieves and validates repository trees and content; `Sync` applies repository policy and mutex control; `State` stores caches; `FileSystem` handles paths and atomic writes; `Security` checks Git blob hashes; and `Logging` manages daily logs and archives.
+
+The repository's terms are provided in `LICENSE`.

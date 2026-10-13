@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Threading;
 using System.Text;
-using System.Web.Script.Serialization;
+using System.Text.Json;
 using UpdateClient.Config;
 using UpdateClient.Remote.Models;
 using UpdateClient.Security;
@@ -21,12 +23,19 @@ namespace UpdateClient.Remote
         string DownloadVerifiedFileToTemporaryPath(RepositoryTarget target, string branch, TreeEntry entry, string tempDirectoryPath, RepositoryRemoteKind remoteKind);
     }
 
-    internal sealed class RemoteRepositoryClient : IRemoteRepositoryClient
+    internal sealed class RemoteRepositoryClient : IRemoteRepositoryClient, IDisposable
     {
         private readonly IRepositoryUrlBuilder urlBuilder;
         private readonly IGitBlobHasher gitBlobHasher;
+        private readonly HttpClient httpClient;
+        private readonly int requestTimeoutMs;
 
         public RemoteRepositoryClient(IRepositoryUrlBuilder urlBuilder, IGitBlobHasher gitBlobHasher)
+            : this(urlBuilder, gitBlobHasher, AppOptions.RequestTimeoutMs)
+        {
+        }
+
+        internal RemoteRepositoryClient(IRepositoryUrlBuilder urlBuilder, IGitBlobHasher gitBlobHasher, int requestTimeoutMs)
         {
             if (urlBuilder == null) throw new ArgumentNullException(nameof(urlBuilder));
             if (gitBlobHasher == null) throw new ArgumentNullException(nameof(gitBlobHasher));
@@ -34,7 +43,15 @@ namespace UpdateClient.Remote
             this.urlBuilder = urlBuilder;
             this.gitBlobHasher = gitBlobHasher;
 
-            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            if (requestTimeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(requestTimeoutMs));
+            this.requestTimeoutMs = requestTimeoutMs;
+            this.httpClient = new HttpClient(new HttpClientHandler
+            {
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            })
+            {
+                Timeout = Timeout.InfiniteTimeSpan
+            };
         }
 
         public RepositoryTreeResult PrepareRepositoryTree(RepositoryTarget target, string branch, string tempDirectoryPath, RepositoryRemoteKind remoteKind)
@@ -132,6 +149,7 @@ namespace UpdateClient.Remote
                         throw new InvalidOperationException("Repository API returned a truncated tree. Refusing to continue because deletion would be unsafe.");
                     }
 
+                    RepositoryTreeValidator.Validate(tree.tree);
                     return new RepositoryTreeResult
                     {
                         Branch = branch,
@@ -188,8 +206,8 @@ namespace UpdateClient.Remote
             try
             {
                 string content = this.DownloadString(url, AppOptions.ApiAcceptHeader);
-                JavaScriptSerializer serializer = CreateSerializer();
-                T value = serializer.Deserialize<T>(content);
+                JsonSerializerOptions jsonOptions = CreateJsonOptions();
+                T value = JsonSerializer.Deserialize<T>(content, jsonOptions);
                 return new RemoteJsonResponse<T> { Url = url, Value = value };
             }
             catch (Exception exception)
@@ -200,39 +218,82 @@ namespace UpdateClient.Remote
 
         private string DownloadString(string url, string accept)
         {
-            HttpWebRequest request = this.CreateRequest(url, accept);
-
-            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
-            using (Stream stream = response.GetResponseStream())
-            using (StreamReader reader = new StreamReader(EnsureStream(stream), Encoding.UTF8))
+            using (HttpResponseMessage response = this.SendRequest(url, accept))
+            using (Stream stream = response.Content.ReadAsStream())
+            using (MemoryStream content = new MemoryStream())
             {
-                return reader.ReadToEnd();
+                this.CopyWithIdleTimeout(stream, content);
+                content.Position = 0;
+                using (StreamReader reader = new StreamReader(content, Encoding.UTF8))
+                {
+                    return reader.ReadToEnd();
+                }
             }
         }
 
         private void DownloadToFile(string url, string destination)
         {
-            HttpWebRequest request = this.CreateRequest(url, AppOptions.BinaryAcceptHeader);
-
-            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
-            using (Stream stream = response.GetResponseStream())
+            using (HttpResponseMessage response = this.SendRequest(url, AppOptions.BinaryAcceptHeader))
+            using (Stream stream = response.Content.ReadAsStream())
             using (FileStream fileStream = File.Open(destination, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                EnsureStream(stream).CopyTo(fileStream);
+                this.CopyWithIdleTimeout(stream, fileStream);
             }
         }
 
-        private HttpWebRequest CreateRequest(string url, string accept)
+        private HttpResponseMessage SendRequest(string url, string accept)
         {
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
-            request.Method = "GET";
-            request.UserAgent = AppOptions.RemoteUserAgent;
-            request.Accept = accept;
-            request.Timeout = AppOptions.RequestTimeoutMs;
-            request.ReadWriteTimeout = AppOptions.RequestTimeoutMs;
-            request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
-            request.Proxy = WebRequest.DefaultWebProxy;
-            return request;
+            using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, url))
+            using (CancellationTokenSource timeout = new CancellationTokenSource(this.requestTimeoutMs))
+            {
+                request.Headers.TryAddWithoutValidation("User-Agent", AppOptions.RemoteUserAgent);
+                request.Headers.TryAddWithoutValidation("Accept", accept);
+                HttpResponseMessage response = null;
+                try
+                {
+                    response = this.httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
+                        .GetAwaiter().GetResult();
+                    response.EnsureSuccessStatusCode();
+                    return response;
+                }
+                catch (OperationCanceledException exception)
+                {
+                    response?.Dispose();
+                    throw new TimeoutException("Request headers timed out.", exception);
+                }
+                catch
+                {
+                    response?.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        private void CopyWithIdleTimeout(Stream source, Stream destination)
+        {
+            byte[] buffer = new byte[81920];
+            while (true)
+            {
+                int read;
+                using (CancellationTokenSource timeout = new CancellationTokenSource(this.requestTimeoutMs))
+                {
+                    try
+                    {
+                        read = source.ReadAsync(buffer.AsMemory(), timeout.Token).AsTask().GetAwaiter().GetResult();
+                    }
+                    catch (OperationCanceledException exception)
+                    {
+                        throw new TimeoutException("Response body read timed out.", exception);
+                    }
+                }
+                if (read == 0) return;
+                destination.Write(buffer, 0, read);
+            }
+        }
+
+        public void Dispose()
+        {
+            this.httpClient.Dispose();
         }
 
         private static void ValidatePrepareRepositoryTreeArguments(RepositoryTarget target, string branch, string tempDirectoryPath)
@@ -262,22 +323,14 @@ namespace UpdateClient.Remote
             if (branchCandidates == null) throw new ArgumentNullException(nameof(branchCandidates));
         }
 
-        private static JavaScriptSerializer CreateSerializer()
+        private static JsonSerializerOptions CreateJsonOptions()
         {
-            JavaScriptSerializer serializer = new JavaScriptSerializer();
-            serializer.MaxJsonLength = int.MaxValue;
-            serializer.RecursionLimit = 256;
-            return serializer;
-        }
-
-        private static Stream EnsureStream(Stream stream)
-        {
-            if (stream == null)
+            return new JsonSerializerOptions
             {
-                throw new InvalidOperationException("Remote endpoint returned no response stream.");
-            }
-
-            return stream;
+                PropertyNameCaseInsensitive = true,
+                MaxDepth = 256,
+                WriteIndented = true
+            };
         }
 
         private void TryDeleteFile(string path)

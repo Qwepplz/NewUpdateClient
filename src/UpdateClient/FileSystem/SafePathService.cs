@@ -63,20 +63,12 @@ namespace UpdateClient.FileSystem
 
         public string GetExecutablePath()
         {
-            try
-            {
-                Assembly entryAssembly = Assembly.GetEntryAssembly();
-                if (entryAssembly == null || string.IsNullOrWhiteSpace(entryAssembly.Location))
-                {
-                    return string.Empty;
-                }
-
-                return this.GetFullPath(entryAssembly.Location);
-            }
-            catch
-            {
-                return string.Empty;
-            }
+            if (!string.IsNullOrWhiteSpace(Environment.ProcessPath))
+                return this.GetFullPath(Environment.ProcessPath);
+            string name = Assembly.GetEntryAssembly()?.GetName().Name;
+            if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+            string assemblyPath = Path.Combine(AppContext.BaseDirectory, name + ".dll");
+            return File.Exists(assemblyPath) ? this.GetFullPath(assemblyPath) : string.Empty;
         }
 
         public string GetLogDirectoryPath(string targetDirectoryPath)
@@ -89,7 +81,7 @@ namespace UpdateClient.FileSystem
         {
             if (string.IsNullOrWhiteSpace(targetDirectoryPath)) throw new ArgumentException("Value cannot be empty.", nameof(targetDirectoryPath));
 
-            HashSet<string> protectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> protectedPaths = new HashSet<string>(PathRules.Comparer);
             string executablePath = this.GetExecutablePath();
             if (!string.IsNullOrWhiteSpace(executablePath))
             {
@@ -148,7 +140,7 @@ namespace UpdateClient.FileSystem
             }
 
             int removedCount = 0;
-            foreach (string artifactPath in artifactPaths.OrderBy(item => item, StringComparer.OrdinalIgnoreCase))
+            foreach (string artifactPath in artifactPaths.OrderBy(item => item, PathRules.Comparer))
             {
                 string fullPath = this.GetFullPath(artifactPath);
                 if (protectedPaths.Contains(fullPath))
@@ -169,12 +161,12 @@ namespace UpdateClient.FileSystem
         {
             if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("Value cannot be empty.", nameof(filePath));
 
-            string stopFullPath = GetValidatedFullPath(stopAtDirectoryPath, nameof(stopAtDirectoryPath)).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string stopFullPath = PathRules.NormalizeDirectoryPath(stopAtDirectoryPath);
             string currentDirectoryPath = Path.GetDirectoryName(filePath);
 
             while (!string.IsNullOrEmpty(currentDirectoryPath))
             {
-                string currentFullPath = this.GetFullPath(currentDirectoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string currentFullPath = PathRules.NormalizeDirectoryPath(currentDirectoryPath);
                 if (currentFullPath.Length <= stopFullPath.Length)
                 {
                     break;
@@ -200,6 +192,7 @@ namespace UpdateClient.FileSystem
             while (pendingDirectories.Count > 0)
             {
                 string currentDirectoryPath = pendingDirectories.Pop();
+                if ((File.GetAttributes(currentDirectoryPath) & FileAttributes.ReparsePoint) != 0) continue;
 
                 IEnumerable<string> files = Enumerable.Empty<string>();
                 try
@@ -212,7 +205,8 @@ namespace UpdateClient.FileSystem
 
                 foreach (string filePath in files)
                 {
-                    yield return filePath;
+                    if ((File.GetAttributes(filePath) & FileAttributes.ReparsePoint) == 0)
+                        yield return filePath;
                 }
 
                 IEnumerable<string> subDirectoryPaths = Enumerable.Empty<string>();
@@ -244,7 +238,7 @@ namespace UpdateClient.FileSystem
 
         public void AssertSafeManagedPath(string targetDirectoryPath, string path)
         {
-            string targetRoot = GetValidatedFullPath(targetDirectoryPath, nameof(targetDirectoryPath)).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string targetRoot = PathRules.NormalizeDirectoryPath(targetDirectoryPath);
             string fullPath = GetValidatedFullPath(path, nameof(path));
 
             if (!this.IsPathWithinTarget(targetRoot, fullPath))
@@ -255,23 +249,18 @@ namespace UpdateClient.FileSystem
             string currentPath = fullPath;
             while (!string.IsNullOrEmpty(currentPath))
             {
-                bool exists = Directory.Exists(currentPath) || File.Exists(currentPath);
-                if (exists)
+                try
                 {
-                    FileAttributes attributes = File.GetAttributes(currentPath);
-                    if ((attributes & FileAttributes.ReparsePoint) != 0)
-                    {
+                    if ((File.GetAttributes(currentPath) & FileAttributes.ReparsePoint) != 0)
                         throw new InvalidOperationException("Refusing to touch a reparse point path: " + currentPath);
-                    }
                 }
-
-                string trimmedCurrentPath = currentPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                if (string.Equals(trimmedCurrentPath, targetRoot, StringComparison.OrdinalIgnoreCase))
+                catch (FileNotFoundException)
                 {
-                    break;
                 }
-
-                currentPath = Path.GetDirectoryName(trimmedCurrentPath);
+                catch (DirectoryNotFoundException)
+                {
+                }
+                currentPath = Path.GetDirectoryName(PathRules.NormalizeDirectoryPath(currentPath));
             }
         }
 
@@ -280,15 +269,15 @@ namespace UpdateClient.FileSystem
             if (string.IsNullOrWhiteSpace(targetRoot)) throw new ArgumentException("Value cannot be empty.", nameof(targetRoot));
             if (string.IsNullOrWhiteSpace(fullPath)) throw new ArgumentException("Value cannot be empty.", nameof(fullPath));
 
-            string normalizedTarget = targetRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string normalizedFullPath = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (string.Equals(normalizedTarget, normalizedFullPath, StringComparison.OrdinalIgnoreCase))
+            string normalizedTarget = PathRules.NormalizeDirectoryPath(targetRoot);
+            string normalizedFullPath = PathRules.NormalizeDirectoryPath(fullPath);
+            if (string.Equals(normalizedTarget, normalizedFullPath, PathRules.Comparison))
             {
                 return true;
             }
 
-            string prefix = normalizedTarget + Path.DirectorySeparatorChar;
-            return normalizedFullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+            string prefix = Path.EndsInDirectorySeparator(normalizedTarget) ? normalizedTarget : normalizedTarget + Path.DirectorySeparatorChar;
+            return normalizedFullPath.StartsWith(prefix, PathRules.Comparison);
         }
     }
 }

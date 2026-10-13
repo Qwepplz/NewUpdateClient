@@ -29,6 +29,8 @@ namespace UpdateClient.FileSystem
             try
             {
                 File.Copy(sourcePath, stagingPath, true);
+                if (!OperatingSystem.IsWindows() && File.Exists(destinationPath))
+                    File.SetUnixFileMode(stagingPath, File.GetUnixFileMode(destinationPath));
                 if (File.Exists(destinationPath))
                 {
                     File.Replace(stagingPath, destinationPath, backupPath, true);

@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using System.Web.Script.Serialization;
+using System.Text.Json;
 using UpdateClient.Config;
 using UpdateClient.FileSystem;
 using UpdateClient.Remote.Models;
@@ -46,7 +46,9 @@ namespace UpdateClient.State
 
             using (SHA256 sha256 = SHA256.Create())
             {
-                byte[] bytes = Encoding.UTF8.GetBytes(this.safePathService.GetFullPath(targetDirectoryPath).ToLowerInvariant());
+                string fullPath = this.safePathService.GetFullPath(targetDirectoryPath);
+                string hashPath = OperatingSystem.IsWindows() ? fullPath.ToLowerInvariant() : PathRules.NormalizeDirectoryPath(fullPath);
+                byte[] bytes = Encoding.UTF8.GetBytes(hashPath);
                 byte[] hash = sha256.ComputeHash(bytes);
                 return ToHexString(hash);
             }
@@ -60,6 +62,7 @@ namespace UpdateClient.State
 
             bool isGet5 = string.Equals(target.StateKey, "get5", StringComparison.OrdinalIgnoreCase);
             List<string> baseCandidates = this.BuildBaseCandidates();
+            if (OperatingSystem.IsWindows())
             foreach (string baseCandidate in baseCandidates)
             {
                 string existingStateDirectoryPath = Path.Combine(baseCandidate, targetHash);
@@ -125,11 +128,11 @@ namespace UpdateClient.State
             {
                 try
                 {
-                    JavaScriptSerializer serializer = CreateSerializer();
+                    JsonSerializerOptions jsonOptions = CreateJsonOptions();
                     string raw = File.ReadAllText(statePath, Encoding.UTF8);
                     if (!string.IsNullOrWhiteSpace(raw))
                     {
-                        SyncState state = serializer.Deserialize<SyncState>(raw);
+                        SyncState state = JsonSerializer.Deserialize<SyncState>(raw, jsonOptions);
                         if (state != null)
                         {
                             if (state.tracked_files != null)
@@ -176,7 +179,7 @@ namespace UpdateClient.State
 
             Directory.CreateDirectory(stateDirectoryPath);
             List<CachedFileState> fileStates = new List<CachedFileState>();
-            foreach (string path in files.Keys.OrderBy(item => item, StringComparer.OrdinalIgnoreCase))
+            foreach (string path in files.Keys.OrderBy(item => item, PathRules.Comparer))
             {
                 CachedFileState fileState = files[path];
                 fileState.path = this.safePathService.NormalizeRelativePath(path);
@@ -186,12 +189,12 @@ namespace UpdateClient.State
             SyncState state = new SyncState
             {
                 version = AppOptions.SyncStateVersion,
-                tracked_files = trackedFiles.Where(item => !string.IsNullOrWhiteSpace(item)).OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList(),
+                tracked_files = trackedFiles.Where(item => !string.IsNullOrWhiteSpace(item)).OrderBy(item => item, PathRules.Comparer).ToList(),
                 files = fileStates
             };
 
-            JavaScriptSerializer serializer = CreateSerializer();
-            string json = FormatJsonForReadability(serializer.Serialize(state));
+            JsonSerializerOptions jsonOptions = CreateJsonOptions();
+            string json = JsonSerializer.Serialize(state, jsonOptions);
             File.WriteAllText(this.GetStateFilePath(stateDirectoryPath), json, new UTF8Encoding(false));
         }
 
@@ -249,14 +252,34 @@ namespace UpdateClient.State
                 }
             }
 
-            this.AppendStateRootCandidates(baseCandidates, Environment.GetEnvironmentVariable("LOCALAPPDATA"));
-            this.AppendStateRootCandidates(baseCandidates, Environment.GetEnvironmentVariable("APPDATA"));
-            this.AppendStateRootCandidates(baseCandidates, Path.GetTempPath());
+            if (OperatingSystem.IsWindows())
+            {
+                this.AppendStateRootCandidates(baseCandidates, Environment.GetEnvironmentVariable("LOCALAPPDATA"));
+                this.AppendStateRootCandidates(baseCandidates, Environment.GetEnvironmentVariable("APPDATA"));
+                this.AppendStateRootCandidates(baseCandidates, Path.GetTempPath());
+            }
+            else
+            {
+                baseCandidates.AddRange(GetLinuxBaseCandidates(Environment.GetEnvironmentVariable("XDG_STATE_HOME"),
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Path.GetTempPath()));
+            }
 
             return baseCandidates
                 .Where(item => !string.IsNullOrWhiteSpace(item))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Distinct(PathRules.Comparer)
                 .ToList();
+        }
+
+        internal static IReadOnlyList<string> GetLinuxBaseCandidates(string xdgStateHome, string userProfilePath, string tempPath)
+        {
+            List<string> candidates = new List<string>();
+            if (!string.IsNullOrWhiteSpace(xdgStateHome) && Path.IsPathFullyQualified(xdgStateHome))
+                candidates.Add(Path.Combine(xdgStateHome, "UpdateClientSync"));
+            if (!string.IsNullOrWhiteSpace(userProfilePath) && Path.IsPathFullyQualified(userProfilePath))
+                candidates.Add(Path.Combine(userProfilePath, ".local", "state", "UpdateClientSync"));
+            if (!string.IsNullOrWhiteSpace(tempPath))
+                candidates.Add(Path.Combine(tempPath, "UpdateClientSync"));
+            return candidates;
         }
 
         private void AppendStateRootCandidates(ICollection<string> candidates, string basePath)
@@ -281,108 +304,14 @@ namespace UpdateClient.State
                 .ToList();
         }
 
-        private static JavaScriptSerializer CreateSerializer()
+        private static JsonSerializerOptions CreateJsonOptions()
         {
-            JavaScriptSerializer serializer = new JavaScriptSerializer();
-            serializer.MaxJsonLength = int.MaxValue;
-            serializer.RecursionLimit = 256;
-            return serializer;
-        }
-
-        private static string FormatJsonForReadability(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json))
+            return new JsonSerializerOptions
             {
-                return json;
-            }
-
-            StringBuilder builder = new StringBuilder(json.Length + (json.Length / 4));
-            int indentLevel = 0;
-            bool inString = false;
-            bool escaping = false;
-            char previousNonWhitespace = '\0';
-
-            foreach (char character in json)
-            {
-                if (escaping)
-                {
-                    builder.Append(character);
-                    escaping = false;
-                    continue;
-                }
-
-                if (inString)
-                {
-                    builder.Append(character);
-                    if (character == '\\')
-                    {
-                        escaping = true;
-                    }
-                    else if (character == '"')
-                    {
-                        inString = false;
-                    }
-
-                    continue;
-                }
-
-                switch (character)
-                {
-                    case '"':
-                        builder.Append(character);
-                        inString = true;
-                        break;
-
-                    case '{':
-                    case '[':
-                        builder.Append(character);
-                        builder.AppendLine();
-                        indentLevel++;
-                        AppendJsonIndentation(builder, indentLevel);
-                        break;
-
-                    case '}':
-                    case ']':
-                        indentLevel = Math.Max(0, indentLevel - 1);
-                        if (previousNonWhitespace != '{' && previousNonWhitespace != '[')
-                        {
-                            builder.AppendLine();
-                            AppendJsonIndentation(builder, indentLevel);
-                        }
-
-                        builder.Append(character);
-                        break;
-
-                    case ',':
-                        builder.Append(character);
-                        builder.AppendLine();
-                        AppendJsonIndentation(builder, indentLevel);
-                        break;
-
-                    case ':':
-                        builder.Append(": ");
-                        break;
-
-                    default:
-                        if (!char.IsWhiteSpace(character))
-                        {
-                            builder.Append(character);
-                        }
-                        break;
-                }
-
-                if (!char.IsWhiteSpace(character))
-                {
-                    previousNonWhitespace = character;
-                }
-            }
-
-            return builder.ToString();
-        }
-
-        private static void AppendJsonIndentation(StringBuilder builder, int indentLevel)
-        {
-            builder.Append(' ', indentLevel * 2);
+                PropertyNameCaseInsensitive = true,
+                MaxDepth = 256,
+                WriteIndented = true
+            };
         }
 
         private static string ToHexString(byte[] bytes)

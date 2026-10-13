@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using UpdateClient.FileSystem;
 
 namespace UpdateClient.State
 {
@@ -8,7 +9,7 @@ namespace UpdateClient.State
         public ImportedSyncState()
         {
             this.TrackedFiles = new List<string>();
-            this.Files = new Dictionary<string, CachedFileState>(StringComparer.OrdinalIgnoreCase);
+            this.Files = new Dictionary<string, CachedFileState>(PathRules.Comparer);
         }
 
         public List<string> TrackedFiles { get; private set; }

@@ -20,7 +20,7 @@ namespace UpdateClient.Config
         public const string BackupArtifactMarker = ".__updateclient_sync_backup__";
         public const string LegacyStagingArtifactMarker = ".__betterbot_sync_staging__";
         public const string LegacyBackupArtifactMarker = ".__betterbot_sync_backup__";
-        public const string MutexNamePrefix = @"Local\UpdateClientSync_";
+        public const string MutexNamePrefix = @"Global\UpdateClientSync_";
         public const int SyncStateVersion = 1;
         public const string PrimaryStateRootDirectoryName = "UpdateClientSync";
         public const string LegacyStateRootDirectoryName = "BetterBotSync";
@@ -56,6 +56,7 @@ namespace UpdateClient.Config
             "Build-UpdateClient.bat",
             "Build-UpdateClient.cmd",
             "UpdateClient.exe",
+            "UpdateClient",
             "_UpdateBetterBot.bat",
             "_UpdateBetterBot.ps1",
             "UpdateBetterBot.cs",

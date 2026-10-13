@@ -6,6 +6,8 @@ namespace UpdateClient.Remote.Models
 
         public string type { get; set; }
 
+        public string mode { get; set; }
+
         public string sha { get; set; }
 
         public long size { get; set; }

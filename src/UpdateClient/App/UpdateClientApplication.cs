@@ -100,8 +100,7 @@ namespace UpdateClient.App
 
         public int Run(string[] args)
         {
-            string targetDirectoryPath = this.safePathService.GetFullPath(
-                AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            string targetDirectoryPath = PathRules.NormalizeDirectoryPath(AppContext.BaseDirectory);
 
             RunContext context = null;
             SyncMutexHandle mutexHandle = null;
@@ -110,6 +109,8 @@ namespace UpdateClient.App
 
             try
             {
+                if (PathRules.Comparer.Equals(targetDirectoryPath, Path.GetPathRoot(targetDirectoryPath)))
+                    throw new InvalidOperationException("The filesystem root cannot be used as a synchronization target.");
                 string selectedBranch;
                 if (!this.startupMenu.ShowStartupPrompt(targetDirectoryPath, out selectedTarget, out selectedBranch))
                 {
@@ -143,6 +144,7 @@ namespace UpdateClient.App
                 }
 
                 CleanupRun(context);
+                (this.remoteRepositoryClient as IDisposable)?.Dispose();
                 this.ShutdownLogging();
             }
         }

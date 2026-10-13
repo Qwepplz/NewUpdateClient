@@ -65,13 +65,13 @@ namespace UpdateClient.Logging
                 logDirectoryPath,
                 AppOptions.LogFilePrefix + "*" + AppOptions.LogFileExtension);
 
-            Array.Sort(logFilePaths, StringComparer.OrdinalIgnoreCase);
+            Array.Sort(logFilePaths, PathRules.Comparer);
 
             List<string> archiveCandidates = new List<string>();
             foreach (string logFilePath in logFilePaths)
             {
                 string fullLogPath = safePathService.GetFullPath(logFilePath);
-                if (!string.Equals(fullLogPath, normalizedCurrentLogPath, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(fullLogPath, normalizedCurrentLogPath, PathRules.Comparison))
                 {
                     archiveCandidates.Add(fullLogPath);
                 }

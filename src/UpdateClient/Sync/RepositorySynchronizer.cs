@@ -77,6 +77,8 @@ namespace UpdateClient.Sync
         {
             SynchronizationContext context = this.CreateContext(target, treeResult, remoteKind, targetDirectoryPath, targetHash, tempRootDirectoryPath, activeLog);
 
+            RepositoryTreeValidator.Validate(context.TreeResult.Tree);
+            this.safePathService.AssertSafeManagedPath(context.TargetDirectoryPath, context.TargetDirectoryPath);
             this.PrepareWorkingState(context);
             PrintRepositoryAccessReady(context);
             this.ClassifyRemoteEntries(context);
@@ -140,8 +142,8 @@ namespace UpdateClient.Sync
             }
 
             context.CachedFiles = context.ImportedState.Files;
-            context.NewCachedFiles = new Dictionary<string, CachedFileState>(StringComparer.OrdinalIgnoreCase);
-            context.RemoteFiles = new Dictionary<string, TreeEntry>(StringComparer.OrdinalIgnoreCase);
+            context.NewCachedFiles = new Dictionary<string, CachedFileState>(PathRules.Comparer);
+            context.RemoteFiles = new Dictionary<string, TreeEntry>(PathRules.Comparer);
 
             foreach (TreeEntry entry in context.TreeResult.Tree)
             {
@@ -261,7 +263,7 @@ namespace UpdateClient.Sync
             }
 
             Console.WriteLine("[4/4] Removing unexpected files from strict directories...");
-            HashSet<string> remoteSet = new HashSet<string>(context.NewManifest, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> remoteSet = new HashSet<string>(context.NewManifest, PathRules.Comparer);
             foreach (string strictDirectory in context.Target.StrictDirectories)
             {
                 this.RemoveUnexpectedFilesInDirectory(context, strictDirectory, remoteSet);
@@ -362,10 +364,10 @@ namespace UpdateClient.Sync
 
         private string GetRelativePathFromTarget(string targetDirectoryPath, string path)
         {
-            string targetRoot = this.safePathService.GetFullPath(targetDirectoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string targetRoot = PathRules.NormalizeDirectoryPath(targetDirectoryPath);
             string fullPath = this.safePathService.GetFullPath(path);
-            string targetPrefix = targetRoot + Path.DirectorySeparatorChar;
-            if (!fullPath.StartsWith(targetPrefix, StringComparison.OrdinalIgnoreCase))
+            string targetPrefix = Path.EndsInDirectorySeparator(targetRoot) ? targetRoot : targetRoot + Path.DirectorySeparatorChar;
+            if (!fullPath.StartsWith(targetPrefix, PathRules.Comparison))
             {
                 throw new InvalidOperationException("Refusing to touch a path outside the target folder: " + fullPath);
             }
@@ -375,7 +377,7 @@ namespace UpdateClient.Sync
 
         private void PersistState(SynchronizationContext context)
         {
-            List<string> sortedManifest = context.NewManifest.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList();
+            List<string> sortedManifest = context.NewManifest.OrderBy(item => item, PathRules.Comparer).ToList();
             File.WriteAllLines(context.ManifestPath, sortedManifest.ToArray(), new UTF8Encoding(false));
             this.syncStateStore.Export(context.StateDirectoryPath, sortedManifest, context.NewCachedFiles);
         }
@@ -420,7 +422,7 @@ namespace UpdateClient.Sync
 
         private static List<string> SortKeys(IEnumerable<string> keys)
         {
-            return keys.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList();
+            return keys.OrderBy(item => item, PathRules.Comparer).ToList();
         }
 
         private static bool IsWithinStrictDirectory(string relativePath, string strictDirectory)
@@ -430,7 +432,7 @@ namespace UpdateClient.Sync
                 return false;
             }
 
-            return relativePath.StartsWith(strictDirectory.Trim('/') + "/", StringComparison.OrdinalIgnoreCase);
+            return relativePath.StartsWith(strictDirectory.Trim('/') + "/", PathRules.Comparison);
         }
 
         private static string FormatProgressStatus(string stageLabel, int current, int total, string metrics)
