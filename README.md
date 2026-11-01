@@ -41,7 +41,20 @@ The product retains its interactive menu and has no unattended command interface
 
 Remote files are checked against cached size, write time and SHA metadata, or verified using Git blob SHA-1. Files that need changes are downloaded and SHA-checked before replacement.
 
-Ordinary directories only receive additions and updates. Upstream deletion, movement or renaming does not delete old local files there. Betterbot strictly synchronizes `addons/` and `cfg/sourcemod/`, removing unexpected files after all downloads succeed. Get5 preserves extra local files throughout the target.
+Ordinary directories only receive additions and updates. Upstream deletion, movement or renaming does not delete old local files there. Betterbot `main` and `dev` share the same strict synchronization rules for these directories, relative to the program directory:
+
+- `addons/`
+- `cfg/sourcemod/`
+- `materials/models/weapons/`
+- `materials/panorama/images/icons/equipment/`
+- `materials/panorama/images/icons/skillgroups/`
+- `materials/panorama/images/tournaments/teams/`
+- `materials/lvl_overlays/`
+- `models/inventory_items/`
+- `models/weapons/`
+- `resource/flash/econ/tournaments/teams/`
+
+After all downloads and updates succeed, Betterbot recursively removes local non-protected files in these directories that are absent from the selected branch, including user-created files, then removes empty directories. A strict directory absent from a valid complete remote tree is treated as empty, so its local non-protected files are removed; a complete empty tree applies this rule to all strict directories. Parent and adjacent directories retain their ordinary synchronization behavior. Get5 preserves extra local files throughout the target.
 
 Root files named `LICENSE`, `README` or `.gitattributes`, including nonempty extension variants such as `README.md`, are excluded case-insensitively and local matching root files are removed when safe. Subdirectory files and names such as `README-old.md` do not match this rule. Matching directories are not recursively deleted.
 

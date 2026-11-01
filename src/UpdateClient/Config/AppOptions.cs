@@ -67,7 +67,19 @@ namespace UpdateClient.Config
 
         public static readonly RepositoryTarget Betterbot =
             new RepositoryTarget("Betterbot", "betterbot", "Qwepplz", "Betterbot", null, null,
-                new[] { "addons", "cfg/sourcemod" });
+                new[]
+                {
+                    "addons",
+                    "cfg/sourcemod",
+                    "materials/models/weapons",
+                    "materials/panorama/images/icons/equipment",
+                    "materials/panorama/images/icons/skillgroups",
+                    "materials/panorama/images/tournaments/teams",
+                    "materials/lvl_overlays",
+                    "models/inventory_items",
+                    "models/weapons",
+                    "resource/flash/econ/tournaments/teams"
+                });
 
         public static readonly RepositoryTarget Get5 =
             new RepositoryTarget("Get5", "get5", "Qwepplz", "get5", "SaUrrr", "get5",
